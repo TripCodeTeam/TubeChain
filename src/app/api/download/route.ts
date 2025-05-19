@@ -1,9 +1,10 @@
+
 import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import fs from 'fs';
 import {
     downloadVideo,
-    ensureYtDlp,
+    ensureVideoDownloader,
     getVideoInfo
 } from '@/lib/video/downloader';
 import {
@@ -44,11 +45,11 @@ export async function POST(request: NextRequest) {
         ensureTempDirectoryExists();
         await cleanTempDirectory();
 
-        // Ensure yt-dlp binary is available
-        const ytDlpInstalled = await ensureYtDlp();
-        if (!ytDlpInstalled) {
+        // Ensure video downloader is available (either yt-dlp or Node.js fallback)
+        const downloaderAvailable = await ensureVideoDownloader();
+        if (!downloaderAvailable) {
             return NextResponse.json({
-                error: 'Failed to install or locate yt-dlp. Please install it manually and ensure it is in the PATH.'
+                error: 'Could not initialize any video downloader. Please try again later.'
             }, { status: 500 });
         }
 
@@ -70,7 +71,7 @@ export async function POST(request: NextRequest) {
             console.error('Error fetching video metadata:', error);
             return NextResponse.json({
                 error: 'Could not retrieve video metadata. Please verify the URL.',
-                details: error
+                details: error instanceof Error ? error.message : String(error)
             }, { status: 500 });
         }
 
@@ -87,7 +88,7 @@ export async function POST(request: NextRequest) {
         } catch (error) {
             console.error('Error downloading video:', error);
             return NextResponse.json({
-                error: 'Failed to download video. Please check the URL and write permissions.',
+                error: 'Failed to download video. Please check the URL and try again.',
                 details: error instanceof Error ? error.message : String(error)
             }, { status: 500 });
         }
