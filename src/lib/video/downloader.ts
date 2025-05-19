@@ -12,13 +12,13 @@ declare global {
         interface Global {
             ytDlpPath?: string;
             ytdlpInitialized?: boolean;
+            nodeDownloader?: any; // Store the downloader directly in memory
         }
     }
 }
 
 /**
  * Detects the exact CPU architecture to download the correct binary
- * This is crucial for serverless environments where the architecture might not be standard
  */
 async function detectArchitecture(): Promise<string> {
     try {
@@ -60,177 +60,206 @@ async function detectArchitecture(): Promise<string> {
 }
 
 /**
- * Creates a simple node-based YouTube downloader script as a fallback method
- * Useful when neither binary nor Python methods work
+ * Creates a Node-based downloader and loads it directly into memory
+ * Avoids file system dependency issues in serverless environments
  */
-async function createNodeBasedDownloader(binDir: string): Promise<boolean> {
-    const downloaderPath = path.join(binDir, 'node-ytdl.js');
+function createInMemoryDownloader(): any {
+    console.log('Creating in-memory Node.js downloader');
 
-    // Simple Node.js script that can download videos without external dependencies
-    const nodeScript = `
-const https = require('https');
-const http = require('http');
-const { execSync } = require('child_process');
-const fs = require('fs');
-const path = require('path');
+    // Simple YouTube downloader functions
+    const nodeDownloader = {
+        getVideoInfo: async function (url: string): Promise<any> {
+            console.log('Getting video info with in-memory downloader');
 
-// Simple YouTube downloader using Node.js built-in modules
-async function getVideoInfo(url) {
-    // Get video ID from URL
-    const videoId = extractVideoId(url);
-    if (!videoId) {
-        throw new Error('Invalid YouTube URL');
-    }
-    
-    // API endpoint to get video info
-    const apiUrl = \`https://www.youtube.com/watch?v=\${videoId}\`;
-    
-    // Get HTML content
-    const html = await fetchUrl(apiUrl);
-    
-    // Extract title
-    const titleMatch = html.match(/"title":"([^"]+)"/);
-    const title = titleMatch ? titleMatch[1] : 'Unknown Title';
-    
-    // Extract thumbnail
-    const thumbnailUrl = \`https://i.ytimg.com/vi/\${videoId}/hqdefault.jpg\`;
-    
-    // Basic metadata
-    return {
-        title,
-        thumbnail: thumbnailUrl,
-        uploader: 'Unknown',
-        duration: 0,
-        videoId
+            // Extract video ID from URL
+            const videoId = extractVideoId(url);
+            if (!videoId) {
+                throw new Error('Invalid YouTube URL');
+            }
+
+            try {
+                // Try to get some basic info about the video
+                const response = await fetch(`https://www.youtube.com/oembed?url=${encodeURIComponent(url)}&format=json`);
+
+                if (response.ok) {
+                    const data = await response.json();
+                    return {
+                        title: data.title || `YouTube Video ${videoId}`,
+                        thumbnail: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
+                        uploader: data.author_name || 'Unknown',
+                        duration: 0,
+                        videoId
+                    };
+                }
+            } catch (error) {
+                console.log('Error fetching oembed data:', error);
+            }
+
+            // Fallback to minimal info if oembed fails
+            return {
+                title: `YouTube Video ${videoId}`,
+                thumbnail: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
+                uploader: 'Unknown',
+                duration: 0,
+                videoId
+            };
+        },
+
+        downloadVideo: async function (url: string, outputPath: string): Promise<void> {
+            console.log('Downloading video with in-memory downloader');
+            const videoId = extractVideoId(url);
+            if (!videoId) {
+                throw new Error('Invalid YouTube URL');
+            }
+
+            try {
+                // Approach 1: Try using the Invidious API
+                const invidiousInstances = [
+                    'https://invidious.snopyta.org',
+                    'https://invidious.kavin.rocks',
+                    'https://vid.puffyan.us'
+                ];
+
+                for (const instance of invidiousInstances) {
+                    try {
+                        console.log(`Trying Invidious instance: ${instance}`);
+                        const apiUrl = `${instance}/api/v1/videos/${videoId}`;
+                        const response = await fetch(apiUrl);
+
+                        if (response.ok) {
+                            const data = await response.json();
+                            if (data.formatStreams && data.formatStreams.length > 0) {
+                                // Find a good quality stream
+                                const formatStream = data.formatStreams.find((s: any) => s.resolution === '720p') ||
+                                    data.formatStreams.find((s: any) => s.resolution === '360p') ||
+                                    data.formatStreams[0];
+
+                                if (formatStream && formatStream.url) {
+                                    console.log(`Found stream URL from Invidious: ${formatStream.resolution}`);
+                                    // Download the file
+                                    await downloadFile(formatStream.url, outputPath);
+                                    return;
+                                }
+                            }
+                        }
+                    } catch (error) {
+                        console.log(`Error with Invidious instance ${instance}:`, error);
+                        // Continue to next instance
+                    }
+                }
+
+                // Approach 2: Try using a web-based API service (as fallback)
+                try {
+                    const apiUrl = `https://api.vevioz.com/api/button/videos/${videoId}`;
+                    const response = await fetch(apiUrl);
+
+                    if (response.ok) {
+                        const html = await response.text();
+                        const downloadLinkMatch = html.match(/href="(https?:\/\/[^"]+download[^"]+)"/);
+
+                        if (downloadLinkMatch && downloadLinkMatch[1]) {
+                            console.log('Found download link from Vevioz API');
+                            await downloadFile(downloadLinkMatch[1], outputPath);
+                            return;
+                        }
+                    }
+                } catch (error) {
+                    console.log('Error with Vevioz API:', error);
+                }
+
+                // Approach 3: Final fallback - use YouTube page to get direct links
+                console.log('Using YouTube page approach to find stream URLs');
+                const ytpageUrl = `https://www.youtube.com/watch?v=${videoId}`;
+                const ytResponse = await fetch(ytpageUrl);
+
+                if (ytResponse.ok) {
+                    const html = await ytResponse.text();
+
+                    // Look for URL encoded streams
+                    const urlEncodedMatch = html.match(/(?:"url_encoded_fmt_stream_map":)(".*?")/);
+                    if (urlEncodedMatch && urlEncodedMatch[1]) {
+                        try {
+                            const formats = JSON.parse(urlEncodedMatch[1]);
+                            const urls = formats.match(/https?:\/\/[^"]+/g);
+
+                            if (urls && urls.length > 0) {
+                                console.log('Found URL from YouTube page');
+                                await downloadFile(urls[0], outputPath);
+                                return;
+                            }
+                        } catch (parseError) {
+                            console.log('Error parsing URL encoded formats:', parseError);
+                        }
+                    }
+
+                    // Look for videoplayback URLs
+                    const videoPlaybackUrls = html.match(/https:\/\/[^"]*videoplayback[^"]*/g);
+                    if (videoPlaybackUrls && videoPlaybackUrls.length > 0) {
+                        console.log('Found videoplayback URL from YouTube page');
+                        await downloadFile(videoPlaybackUrls[0], outputPath);
+                        return;
+                    }
+                }
+
+                throw new Error('Could not find any valid stream URL');
+            } catch (error) {
+                console.error('All download methods failed:', error);
+                throw error;
+            }
+        }
     };
-}
 
-function extractVideoId(url) {
-    // Handle various YouTube URL formats
-    const patterns = [
-        /(?:youtube\\.com\\/watch\\?v=|youtu\\.be\\/)([^&?\\s]+)/,
-        /youtube\\.com\\/embed\\/([^&?\\s]+)/,
-        /youtube\\.com\\/v\\/([^&?\\s]+)/
-    ];
-    
-    for (const pattern of patterns) {
-        const match = url.match(pattern);
-        if (match) return match[1];
-    }
-    
-    return null;
-}
+    // Helper function to extract video ID
+    function extractVideoId(url: string): string | null {
+        const patterns = [
+            /(?:youtube\.com\/watch\?v=|youtu\.be\/)([^&?\s]+)/,
+            /youtube\.com\/embed\/([^&?\s]+)/,
+            /youtube\.com\/v\/([^&?\s]+)/
+        ];
 
-async function fetchUrl(url) {
-    return new Promise((resolve, reject) => {
-        const protocol = url.startsWith('https') ? https : http;
-        
-        protocol.get(url, (res) => {
-            if (res.statusCode !== 200) {
-                reject(new Error(\`Request failed with status \${res.statusCode}\`));
-                return;
-            }
-            
-            let data = '';
-            res.on('data', (chunk) => {
-                data += chunk;
-            });
-            
-            res.on('end', () => {
-                resolve(data);
-            });
-        }).on('error', reject);
-    });
-}
-
-async function downloadVideo(url, outputPath) {
-    try {
-        // For actual download, we'll use curl as a fallback since it's available in most environments
-        const videoId = extractVideoId(url);
-        if (!videoId) {
-            throw new Error('Invalid YouTube URL');
+        for (const pattern of patterns) {
+            const match = url.match(pattern);
+            if (match) return match[1];
         }
-        
-        // Try to get the direct video URL using youtube-dl-exec
-        const tempHtmlPath = outputPath + '.html';
-        
-        // Download the page HTML
-        execSync(\`curl -s "https://www.youtube.com/watch?v=\${videoId}" -o "\${tempHtmlPath}"\`);
-        
-        // Read the downloaded HTML
-        const html = fs.readFileSync(tempHtmlPath, 'utf8');
-        
-        // Look for formats in the HTML (this is a simplified approach)
-        const urlEncodedFormats = html.match(/(?:"url_encoded_fmt_stream_map":)(".*?")/);
-        
-        if (urlEncodedFormats && urlEncodedFormats[1]) {
-            const formats = JSON.parse(urlEncodedFormats[1]);
-            const urls = formats.match(/https?:\\/\\/[^"]+/g);
-            
-            if (urls && urls.length > 0) {
-                // Take the first URL we find
-                execSync(\`curl -L "\${urls[0]}" -o "\${outputPath}"\`);
-                return;
+
+        return null;
+    }
+
+    // Helper function to download file using fetch API
+    async function downloadFile(url: string, outputPath: string): Promise<void> {
+        console.log(`Downloading file from ${url} to ${outputPath}`);
+
+        try {
+            // Use curl for better compatibility with serverless environments
+            await execAsync(`curl -L "${url}" -o "${outputPath}"`);
+            console.log('Download completed using curl');
+        } catch (curlError) {
+            console.error('Curl download failed:', curlError);
+
+            // Fallback to fetch + node file API if curl fails
+            try {
+                console.log('Trying fetch API download fallback');
+                const response = await fetch(url);
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                const buffer = await response.arrayBuffer();
+                fs.writeFileSync(outputPath, Buffer.from(buffer));
+                console.log('Download completed using fetch API');
+            } catch (fetchError) {
+                console.error('Fetch download failed:', fetchError);
+                throw fetchError;
             }
         }
-        
-        // If we couldn't extract URLs, use a YouTube downloader service as fallback
-        // Note: This approach relies on external services which may change
-        const ytdlService = \`https://api.vevioz.com/api/button/mp4/\${videoId}\`;
-        
-        // Download the service page
-        execSync(\`curl -s "\${ytdlService}" -o "\${tempHtmlPath}"\`);
-        
-        // Read the service page HTML
-        const serviceHtml = fs.readFileSync(tempHtmlPath, 'utf8');
-        
-        // Extract download links
-        const downloadLinks = serviceHtml.match(/href="(https?:\\/\\/[^"]+download[^"]+)"/g);
-        
-        if (downloadLinks && downloadLinks.length > 0) {
-            // Extract the URL
-            const dlUrl = downloadLinks[0].match(/href="([^"]+)"/)[1];
-            
-            // Download the video
-            execSync(\`curl -L "\${dlUrl}" -o "\${outputPath}"\`);
-        } else {
-            throw new Error('Could not find download links');
-        }
-        
-        // Clean up
-        if (fs.existsSync(tempHtmlPath)) {
-            fs.unlinkSync(tempHtmlPath);
-        }
-    } catch (error) {
-        console.error('Node downloader error:', error);
-        throw error;
     }
-}
 
-// Export functions
-module.exports = { getVideoInfo, downloadVideo };
-    `;
-
-    // Write the script to disk
-    try {
-        fs.writeFileSync(downloaderPath, nodeScript);
-        console.log(`Created Node.js based downloader at ${downloaderPath}`);
-
-        // Set the global path to use our Node.js script
-        (global as NodeJS.Global).ytDlpPath = 'node ' + downloaderPath;
-        (global as NodeJS.Global).ytdlpInitialized = true;
-
-        return true;
-    } catch (error) {
-        console.error('Failed to create Node.js downloader:', error);
-        return false;
-    }
+    return nodeDownloader;
 }
 
 /**
- * Ensures some form of video downloading capability is available
- * - Tries multiple binary architectures
- * - Implements Node.js fallback for restricted environments
+ * Ensures the YouTube download capability is available
  */
 export async function ensureYtDlp(): Promise<boolean> {
     // If already initialized, don't repeat
@@ -238,139 +267,26 @@ export async function ensureYtDlp(): Promise<boolean> {
         return true;
     }
 
+    // First, try to use system yt-dlp
     try {
-        // Verify existing installation
         await execAsync('yt-dlp --version');
-        console.log('yt-dlp is already installed.');
+        console.log('yt-dlp is already installed in the system.');
         (global as NodeJS.Global).ytdlpInitialized = true;
         return true;
-    } catch {
-        console.log('yt-dlp not found. Attempting local installation...');
+    } catch (systemError) {
+        console.log('System yt-dlp not found. Creating in-memory downloader...');
 
-        // Create bin directory based on environment
-        const binDir = process.env.NODE_ENV === 'production'
-            ? path.join(os.tmpdir(), 'app-bin') // Use system temp in production
-            : path.join(process.cwd(), 'bin');  // Use local bin in development
+        // Create in-memory downloader
+        (global as NodeJS.Global).nodeDownloader = createInMemoryDownloader();
+        (global as NodeJS.Global).ytdlpInitialized = true;
+        (global as NodeJS.Global).ytDlpPath = 'in-memory';
 
-        try {
-            if (!fs.existsSync(binDir)) {
-                fs.mkdirSync(binDir, { recursive: true });
-                console.log(`Created bin directory at: ${binDir}`);
-            }
-        } catch (mkdirError) {
-            console.error(`Failed to create bin directory at ${binDir}:`, mkdirError);
-            // Even if directory creation fails, continue to try Node-based solution
-        }
-
-        // Try to detect the architecture for more accurate binary selection
-        const arch = await detectArchitecture();
-        console.log(`Detected architecture: ${arch}`);
-
-        // Track attempts to avoid redundant tries
-        let binarySuccess = false;
-
-        // Try each architecture-specific binary
-        const architectures = [arch, 'x86_64', 'aarch64', 'armv7'];
-
-        for (const architecture of architectures) {
-            if (binarySuccess) break;
-
-            const ytDlpPath = path.join(binDir, 'yt-dlp');
-            const binaryUrl = `https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux_${architecture}`;
-
-            try {
-                console.log(`Trying binary for ${architecture}...`);
-                await execAsync(`curl -L "${binaryUrl}" -o "${ytDlpPath}"`);
-                await execAsync(`chmod +x "${ytDlpPath}"`);
-
-                // Verify it works
-                try {
-                    await execAsync(`"${ytDlpPath}" --version`);
-                    console.log(`Binary for ${architecture} works!`);
-
-                    (global as NodeJS.Global).ytDlpPath = ytDlpPath;
-                    (global as NodeJS.Global).ytdlpInitialized = true;
-                    binarySuccess = true;
-                    break;
-                } catch (verifyError) {
-                    console.log(`Binary for ${architecture} failed verification:`, verifyError);
-                }
-            } catch (downloadError) {
-                console.log(`Failed to download binary for ${architecture}:`, downloadError);
-            }
-        }
-
-        // If binary approach failed, try curl-based solution
-        if (!binarySuccess) {
-            console.log('All binaries failed, creating Node.js fallback downloader...');
-            const nodeDownloaderCreated = await createNodeBasedDownloader(binDir);
-
-            if (nodeDownloaderCreated) {
-                return true;
-            }
-
-            // Last resort: create a shell script wrapper that uses curl
-            try {
-                const shellScriptPath = path.join(binDir, 'yt-dlp-curl.sh');
-
-                // Create a shell script that uses curl to download videos
-                const shellScript = `#!/bin/sh
-# Simple curl-based YouTube downloader
-url="$1"
-output="$2"
-
-# Extract video ID
-video_id=$(echo "$url" | sed -E 's/.*v=([^&]+).*/\\1/')
-
-# Get webpage
-curl -s "https://www.youtube.com/watch?v=$video_id" > "\${output}.html"
-
-# Extract info
-title=$(grep -o '"title":"[^"]*"' "$output.html" | head -1 | cut -d'"' -f4)
-uploader=$(grep -o '"ownerChannelName":"[^"]*"' "$output.html" | head -1 | cut -d'"' -f4)
-
-# Create JSON info
-echo "{
-  \\"title\\": \\"$title\\",
-  \\"uploader\\": \\"$uploader\\",
-  \\"thumbnail\\": \\"https://i.ytimg.com/vi/$video_id/hqdefault.jpg\\",
-  \\"duration\\": 0
-}" > "$3"
-
-# Try to get direct video URL (simplified)
-dl_url=$(grep -o 'https://[^"]*videoplayback[^"]*' "$output.html" | head -1)
-
-if [ -n "$dl_url" ]; then
-  curl -L "$dl_url" -o "$output"
-else
-  echo "Failed to find direct download URL"
-  exit 1
-fi
-
-# Clean up
-rm "$output.html"
-`;
-
-                // Write shell script
-                fs.writeFileSync(shellScriptPath, shellScript);
-                await execAsync(`chmod +x "${shellScriptPath}"`);
-
-                (global as NodeJS.Global).ytDlpPath = shellScriptPath;
-                (global as NodeJS.Global).ytdlpInitialized = true;
-                console.log('Created shell script fallback at:', shellScriptPath);
-                return true;
-            } catch (shellError) {
-                console.error('Shell script creation failed:', shellError);
-                return false;
-            }
-        }
-
-        return binarySuccess;
+        return true;
     }
 }
 
 /**
- * Retrieves video metadata using the available method
+ * Retrieves video metadata
  */
 export async function getVideoInfo(url: string, infoPath: string): Promise<any> {
     console.log('Fetching video metadata...');
@@ -380,35 +296,20 @@ export async function getVideoInfo(url: string, infoPath: string): Promise<any> 
         await ensureYtDlp();
     }
 
-    // Handle Node.js downloader method
-    if (typeof (global as NodeJS.Global).ytDlpPath === 'string' && (global as NodeJS.Global).ytDlpPath && ((global as NodeJS.Global).ytDlpPath?.includes('node-ytdl.js'))) {
+    // Handle in-memory downloader
+    if ((global as NodeJS.Global).ytDlpPath === 'in-memory' && (global as NodeJS.Global).nodeDownloader) {
         try {
-            // Dynamically load the Node.js downloader
-            const downloaderPath = ((global as NodeJS.Global).ytDlpPath as string).split(' ')[1];
-            const nodeDownloader = require(downloaderPath);
-
-            // Use the Node.js downloader to get video info
-            const info = await nodeDownloader.getVideoInfo(url);
+            console.log('Using in-memory downloader for metadata');
+            const info = await (global as NodeJS.Global).nodeDownloader.getVideoInfo(url);
 
             // Save the info to the specified path
             fs.writeFileSync(infoPath, JSON.stringify(info));
 
             return info;
-        } catch (nodeError) {
-            console.error('Node.js downloader failed:', nodeError);
-            // Fall through to shell script method
-        }
-    }
+        } catch (error) {
+            console.error('In-memory downloader failed:', error);
 
-    // Handle shell script method
-    if (((global as NodeJS.Global).ytDlpPath ?? '').includes('yt-dlp-curl.sh')) {
-        try {
-            await execAsync(`"${(global as NodeJS.Global).ytDlpPath}" "${url}" "dummy.mp4" "${infoPath}"`);
-            return JSON.parse(fs.readFileSync(infoPath, 'utf8'));
-        } catch (shellError) {
-            console.error('Shell script downloader failed:', shellError);
-
-            // Return minimal info as last resort
+            // Fallback to minimal info
             const videoId = url.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([^&?]+)/)?.[1] || 'unknown';
             const fallbackInfo = {
                 title: `YouTube Video ${videoId}`,
@@ -422,23 +323,15 @@ export async function getVideoInfo(url: string, infoPath: string): Promise<any> 
         }
     }
 
-    // Standard yt-dlp binary approach
+    // System yt-dlp approach (if we got here, we know it's available)
     try {
-        // Use the stored path if available
-        const ytDlpCommand = (global as NodeJS.Global).ytDlpPath ? `"${(global as NodeJS.Global).ytDlpPath}"` : 'yt-dlp';
-
-        // Primary method: structured JSON output
-        await execAsync(`${ytDlpCommand} "${url}" --dump-json --no-check-certificate --no-warnings > "${infoPath}"`);
-
+        await execAsync(`yt-dlp "${url}" --dump-json --no-check-certificate --no-warnings > "${infoPath}"`);
         return JSON.parse(fs.readFileSync(infoPath, 'utf8'));
     } catch (error) {
         console.log('JSON parsing failed. Using text-based extraction...', error);
 
         try {
-            // Fallback method: raw field extraction
-            const ytDlpCommand = (global as NodeJS.Global).ytDlpPath ? `"${(global as NodeJS.Global).ytDlpPath}"` : 'yt-dlp';
-            await execAsync(`${ytDlpCommand} "${url}" --print title --print thumbnail --print duration --print uploader --no-check-certificate --no-warnings > "${infoPath}.txt"`);
-
+            await execAsync(`yt-dlp "${url}" --print title --print thumbnail --print duration --print uploader --no-check-certificate --no-warnings > "${infoPath}.txt"`);
             const rawFields = fs.readFileSync(`${infoPath}.txt`, 'utf8').split('\n').filter(Boolean);
 
             const metadata = {
@@ -469,7 +362,7 @@ export async function getVideoInfo(url: string, infoPath: string): Promise<any> 
 }
 
 /**
- * Downloads video using the available method
+ * Downloads video file
  */
 export async function downloadVideo(url: string, outputPath: string): Promise<void> {
     console.log('Starting video download...');
@@ -480,115 +373,44 @@ export async function downloadVideo(url: string, outputPath: string): Promise<vo
         await ensureYtDlp();
     }
 
-    // Handle Node.js downloader method
-    if (((global as NodeJS.Global).ytDlpPath ?? '').includes('node-ytdl.js')) {
+    // Handle in-memory downloader
+    if ((global as NodeJS.Global).ytDlpPath === 'in-memory' && (global as NodeJS.Global).nodeDownloader) {
         try {
-            // Dynamically load the Node.js downloader
-            const downloaderPath = ((global as NodeJS.Global).ytDlpPath as string).split(' ')[1];
-            const nodeDownloader = require(downloaderPath);
-
-            // Use the Node.js downloader
-            await nodeDownloader.downloadVideo(url, outputPath);
+            console.log('Using in-memory downloader for video');
+            await (global as NodeJS.Global).nodeDownloader.downloadVideo(url, outputPath);
             return;
-        } catch (nodeError) {
-            console.error('Node.js downloader failed:', nodeError);
-            // Fall through to shell script method
+        } catch (error) {
+            console.error('In-memory downloader failed:', error);
+            throw error;
         }
     }
 
-    // Handle shell script method
-    if ((global as NodeJS.Global).ytDlpPath?.includes('yt-dlp-curl.sh')) {
-        try {
-            // The third parameter is for info JSON but it's not important here
-            await execAsync(`"${(global as NodeJS.Global).ytDlpPath}" "${url}" "${outputPath}" "${outputPath}.info.json"`);
-            return;
-        } catch (shellError) {
-            console.error('Shell script downloader failed:', shellError);
-            throw shellError;
-        }
-    }
-
-    // Standard yt-dlp binary approach
-    const ytDlpCommand = (global as NodeJS.Global).ytDlpPath ? `"${(global as NodeJS.Global).ytDlpPath}"` : 'yt-dlp';
-
+    // Standard yt-dlp approach (we'll only get here if system yt-dlp is available)
     // Get base filename without extension for consistent naming
     const baseOutputPath = outputPath.replace(/\.mp4$/, '');
 
     try {
         // Format selection prioritizing audio and video quality
-        const command = `${ytDlpCommand} "${url}" -f "bestvideo+bestaudio/best" --merge-output-format mp4 -o "${baseOutputPath}.%(ext)s" --no-check-certificate --no-warnings`;
+        const command = `yt-dlp "${url}" -f "bestvideo+bestaudio/best" --merge-output-format mp4 -o "${baseOutputPath}.%(ext)s" --no-check-certificate --no-warnings`;
         console.log('Executing command:', command);
 
         await execAsync(command);
-
-        // Small delay for filesystem consistency
-        await new Promise(resolve => setTimeout(resolve, 1000));
     } catch (dlError) {
         console.error('Primary download failed:', dlError);
-        await tryFallbackDownload(url, baseOutputPath);
-    }
-}
 
-/**
- * Attempts alternative download strategies
- */
-async function tryFallbackDownload(url: string, baseOutputPath: string): Promise<void> {
-    console.log('Initiating fallback download methods...');
-
-    // Use the stored path if available
-    const ytDlpCommand = (global as NodeJS.Global).ytDlpPath ? `"${(global as NodeJS.Global).ytDlpPath}"` : 'yt-dlp';
-
-    try {
-        // First fallback: Try with merged format
-        await execAsync(`${ytDlpCommand} "${url}" -f "best" -o "${baseOutputPath}.%(ext)s" --no-check-certificate --no-warnings`);
-
-        // If first fallback fails, try with specific audio/video format combo
-        const files = fs.readdirSync(path.dirname(baseOutputPath));
-        const baseFileName = path.basename(baseOutputPath);
-        const downloadedFile = files.find(file => file.startsWith(baseFileName));
-
-        if (!downloadedFile) {
-            // Second fallback: More explicit about audio
-            await execAsync(`${ytDlpCommand} "${url}" -f "bestvideo+bestaudio" --audio-format mp3 --prefer-ffmpeg -o "${baseOutputPath}.%(ext)s" --no-check-certificate --no-warnings`);
-        }
-    } catch (fallbackError) {
-        console.error('Fallback methods failed:', fallbackError);
-
-        // Last resort: Try direct curl download if possible
+        // Try simpler approach
         try {
-            // Extract video ID
-            const videoId = url.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([^&?]+)/)?.[1];
+            await execAsync(`yt-dlp "${url}" -f "best" -o "${baseOutputPath}.%(ext)s" --no-check-certificate --no-warnings`);
+        } catch (simpleError) {
+            console.error('Simple download failed:', simpleError);
 
-            if (!videoId) {
-                throw new Error('Could not extract video ID');
+            // Fallback to in-memory downloader as last resort
+            if (!(global as NodeJS.Global).nodeDownloader) {
+                (global as NodeJS.Global).nodeDownloader = createInMemoryDownloader();
             }
 
-            // Get webpage to search for direct URLs
-            const htmlPath = `${baseOutputPath}.html`;
-            await execAsync(`curl -s "https://www.youtube.com/watch?v=${videoId}" -o "${htmlPath}"`);
-
-            // Read the HTML
-            const html = fs.readFileSync(htmlPath, 'utf8');
-
-            // Look for direct video URLs (simplified approach)
-            const directUrls = html.match(/https:\/\/[^"]*videoplayback[^"]*/g);
-
-            if (directUrls && directUrls.length > 0) {
-                // Use the first direct URL
-                await execAsync(`curl -L "${directUrls[0]}" -o "${baseOutputPath}.mp4"`);
-                console.log('Downloaded using direct URL extraction');
-
-                // Clean up
-                fs.unlinkSync(htmlPath);
-                return;
-            }
-
-            // Clean up
-            fs.unlinkSync(htmlPath);
-            throw new Error('No direct URLs found in page');
-        } catch (curlError) {
-            console.error('Direct curl download failed:', curlError);
-            throw new Error(`Download failed after multiple attempts: ${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`);
+            console.log('Using in-memory downloader as fallback');
+            await (global as NodeJS.Global).nodeDownloader.downloadVideo(url, outputPath);
         }
     }
 }
