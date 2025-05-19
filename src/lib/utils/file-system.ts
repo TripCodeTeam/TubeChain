@@ -1,10 +1,12 @@
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
 import { rimraf } from 'rimraf';
 
-// Directory for storing temporary video files
-// Changed from 'temp' to 'public/temp' for Next.js accessibility
-export const TEMP_DIR = path.join(process.cwd(), 'public', 'temp');
+// Define a temp directory that will work in all environments
+export const TEMP_DIR = process.env.NODE_ENV === 'production'
+  ? path.join(os.tmpdir(), 'app-temp') // Use system temp directory in production
+  : path.join(process.cwd(), 'public', 'temp'); // Use local temp in development
 
 /**
  * Ensures the temporary directory exists
@@ -16,6 +18,19 @@ export function ensureTempDirectoryExists(): void {
   }
 }
 
+// Ensure the directory exists
+export function ensureDirExists(dirPath: string) {
+  if (!fs.existsSync(dirPath)) {
+    try {
+      fs.mkdirSync(dirPath, { recursive: true });
+      console.log(`Created directory: ${dirPath}`);
+    } catch (error) {
+      console.error(`Failed to create directory ${dirPath}:`, error);
+      // Continue execution - we'll handle file errors separately
+    }
+  }
+}
+
 /**
  * Cleans up old temporary files from disk
  * - Preserves files younger than 1 hour
@@ -24,13 +39,13 @@ export function ensureTempDirectoryExists(): void {
 export async function cleanTempDirectory(): Promise<void> {
   try {
     ensureTempDirectoryExists();
-    
+
     const files = fs.readdirSync(TEMP_DIR);
     const oneHourAgo = Date.now() - (60 * 60 * 1000); // Files older than 1 hour
-    
+
     for (const file of files) {
       const filePath = path.join(TEMP_DIR, file);
-      
+
       try {
         const stats = fs.statSync(filePath);
         // Delete file if it's older than threshold
@@ -42,7 +57,7 @@ export async function cleanTempDirectory(): Promise<void> {
         console.error(`Error processing file ${file}:`, err);
       }
     }
-    
+
     console.log('Temporary directory cleanup complete');
   } catch (error) {
     console.error('Failed to clean temporary directory:', error);
@@ -67,11 +82,11 @@ export function generateSafeFilename(title: string, timestamp: number): string {
  * @param targetFilename - File to preserve
  */
 export function cleanExtraFiles(baseFilename: string, targetFilename: string): void {
-  const extraFiles = fs.readdirSync(TEMP_DIR).filter(file => 
+  const extraFiles = fs.readdirSync(TEMP_DIR).filter(file =>
     file !== targetFilename &&
     file.includes(baseFilename)
   );
-  
+
   extraFiles.forEach(file => {
     try {
       fs.unlinkSync(path.join(TEMP_DIR, file));

@@ -4,13 +4,13 @@ import { useState, useEffect } from "react";
 
 // Interface for video metadata used in the UI
 type VideoInfo = {
-  title: string;          // Original video title
-  filename: string;       // Local filename after download
-  thumbnail: string;      // Best available thumbnail URL
-  videoId?: string;       // YouTube video identifier
-  uploader?: string;      // Content creator name
-  duration?: number;      // Video length in seconds
-  fileSize?: string;      // File size in human-readable format
+    title: string;          // Original video title
+    filename: string;       // Local filename after download
+    thumbnail: string;      // Best available thumbnail URL
+    videoId?: string;       // YouTube video identifier
+    uploader?: string;      // Content creator name
+    duration?: number;      // Video length in seconds
+    fileSize?: string;      // File size in human-readable format
 };
 
 /**
@@ -64,17 +64,17 @@ function useYoutube() {
         if (!url.trim()) {
             return { valid: false, message: 'Please enter a YouTube URL' };
         }
-        
+
         // Check if it contains youtube domain
         if (!url.includes('youtube.com') && !url.includes('youtu.be')) {
             return { valid: false, message: 'This does not appear to be a YouTube URL' };
         }
-        
+
         const videoId = extractVideoId(url);
         if (!videoId) {
             return { valid: false, message: 'Could not extract video ID from URL' };
         }
-        
+
         return { valid: true };
     };
 
@@ -88,7 +88,7 @@ function useYoutube() {
         setError('');
         setVideoInfo(null);
         setDownloadProgress(null);
-        
+
         // Validate URL first
         const validation = validateYoutubeUrl(url);
         if (!validation.valid) {
@@ -97,14 +97,14 @@ function useYoutube() {
         }
 
         setIsLoading(true);
-        
+
         try {
             const videoId = extractVideoId(url);
-            
+
             // Call the API with abort controller for cancellation support
             const abortController = new AbortController();
             const timeoutId = setTimeout(() => abortController.abort(), 60000); // 60s timeout
-            
+
             const response = await fetch('/api/download', {
                 method: 'POST',
                 headers: {
@@ -113,7 +113,7 @@ function useYoutube() {
                 body: JSON.stringify({ url }),
                 signal: abortController.signal
             });
-            
+
             clearTimeout(timeoutId);
 
             if (!response.ok) {
@@ -135,7 +135,7 @@ function useYoutube() {
                 ...data,
                 videoId
             });
-            
+
             setDownloadStatus('complete');
         } catch (err) {
             if (err instanceof Error) {
@@ -154,38 +154,62 @@ function useYoutube() {
     };
 
     /**
-     * Initiates video file download with progress tracking
+     * Initiates video file download with improved error handling and feedback
      */
-    const downloadVideo = () => {
+    const downloadVideo = async () => {
         if (!videoInfo) return;
-        
+
         setDownloadStatus('downloading');
-        
+        setError('');
+
         try {
             // Create a download link and trigger it
             const downloadUrl = `/api/file?filename=${encodeURIComponent(videoInfo.filename)}`;
-            
-            // Using iframe to avoid navigation away from the page
-            const downloadFrame = document.createElement('iframe');
-            downloadFrame.style.display = 'none';
-            document.body.appendChild(downloadFrame);
-            downloadFrame.src = downloadUrl;
-            
-            // Set a timeout to remove the iframe
+            console.log('Requesting file download from:', downloadUrl);
+
+            // First check if the file exists with a HEAD request
+            const checkResponse = await fetch(downloadUrl, { method: 'HEAD' });
+
+            if (!checkResponse.ok) {
+                console.error('File availability check failed:', checkResponse.status, checkResponse.statusText);
+
+                // Get more details about why the file isn't available
+                const errorDetails = await checkResponse.json().catch(() => ({}));
+                console.error('Error details:', errorDetails);
+
+                throw new Error(`File not available: ${errorDetails.error || checkResponse.statusText}`);
+            }
+
+            // The file exists, now download it
+            console.log('File is available, starting download');
+
+            // Create an anchor element and trigger download
+            const downloadLink = document.createElement('a');
+            downloadLink.href = downloadUrl;
+            downloadLink.download = videoInfo.filename; // Suggest filename to browser
+            document.body.appendChild(downloadLink);
+            downloadLink.click();
+
+            // Remove the link after a brief delay
             setTimeout(() => {
-                if (document.body.contains(downloadFrame)) {
-                    document.body.removeChild(downloadFrame);
+                if (document.body.contains(downloadLink)) {
+                    document.body.removeChild(downloadLink);
                 }
             }, 2000);
-            
-            // Change status after a brief delay (simulating progress)
+
+            // Change status after a brief delay
             setTimeout(() => {
                 setDownloadStatus('complete');
             }, 1500);
         } catch (err) {
             console.error('Download error:', err);
             setDownloadStatus('error');
-            setError('Download failed. Please try again.');
+
+            if (err instanceof Error) {
+                setError(`Download failed: ${err.message}`);
+            } else {
+                setError('Download failed. Please try again.');
+            }
         }
     };
 
