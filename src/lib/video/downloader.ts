@@ -14,7 +14,8 @@ declare global {
 /**
  * Ensures yt-dlp binary is available in the system
  * - Uses standalone binary that doesn't require Python
- * - Works in environments without Python installed (like Vercel)
+ * - Falls back to Python pip installation if standalone fails
+ * - Has multiple fallback strategies for different environments
  */
 export async function ensureYtDlp(): Promise<boolean> {
     try {
@@ -46,11 +47,16 @@ export async function ensureYtDlp(): Promise<boolean> {
             ? path.join(binDir, 'yt-dlp.exe')
             : path.join(binDir, 'yt-dlp');
 
+        // Track if we've tried the static binary
+        let triedStaticBinary = false;
+
         try {
-            // Use the standalone binary version for Linux environments (like Vercel)
-            if (!isWindows && !isMac && process.env.NODE_ENV === 'production') {
-                console.log('Downloading standalone binary for Linux...');
-                await execAsync(`curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux -o "${ytDlpPath}"`);
+            // First attempt: Use static binary for Linux environments
+            if (!isWindows && !isMac) {
+                console.log('Downloading static binary for Linux...');
+                // Use the -static version which has fewer dependencies
+                await execAsync(`curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux_aarch64 -o "${ytDlpPath}"`);
+                triedStaticBinary = true;
             } else if (isWindows) {
                 // Windows download
                 try {
@@ -59,11 +65,11 @@ export async function ensureYtDlp(): Promise<boolean> {
                     await execAsync(`powershell -Command "Invoke-WebRequest -Uri 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe' -OutFile '${ytDlpPath}'"`);
                 }
             } else {
-                // Mac/other Linux download
+                // Mac download
                 try {
-                    await execAsync(`curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o "${ytDlpPath}"`);
+                    await execAsync(`curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos -o "${ytDlpPath}"`);
                 } catch {
-                    await execAsync(`wget -O "${ytDlpPath}" https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp`);
+                    await execAsync(`wget -O "${ytDlpPath}" https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos`);
                 }
             }
 
@@ -77,8 +83,18 @@ export async function ensureYtDlp(): Promise<boolean> {
             console.log(`yt-dlp installed at: ${ytDlpPath}`);
 
         } catch (directDownloadError) {
-            console.error('Download error details:', directDownloadError);
-            return false;
+            console.error('Direct download error details:', directDownloadError);
+
+            // If not Windows and we just tried the static binary, try another architecture
+            if (!isWindows && !isMac && triedStaticBinary) {
+                try {
+                    console.log('Trying alternate architecture binary for Linux...');
+                    await execAsync(`curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux -o "${ytDlpPath}"`);
+                    await execAsync(`chmod +x "${ytDlpPath}"`);
+                } catch (altArchError) {
+                    console.error('Alternate architecture download failed:', altArchError);
+                }
+            }
         }
 
         // Final verification - use direct path instead of relying on PATH
@@ -92,19 +108,62 @@ export async function ensureYtDlp(): Promise<boolean> {
             return true;
         } catch (verificationError) {
             console.error('Installation verification failed:', verificationError);
+
+            // Try Python-based installation as fallback
+            return await tryPythonInstallation(binDir);
+        }
+    }
+}
+
+/**
+ * Attempts to install yt-dlp using Python pip as a fallback method
+ */
+async function tryPythonInstallation(binDir: string): Promise<boolean> {
+    console.log('Trying Python-based installation as fallback...');
+
+    try {
+        // Check if Python is available
+        await execAsync('python3 --version');
+
+        // Install yt-dlp via pip to user directory
+        await execAsync('python3 -m pip install --user yt-dlp');
+
+        // Check if installation succeeded
+        await execAsync('python3 -m yt_dlp --version');
+
+        // Set the command to use Python module
+        global.ytDlpPath = 'python3 -m yt_dlp';
+
+        console.log('Successfully installed yt-dlp via Python pip');
+        return true;
+    } catch (pythonError) {
+        console.error('Python-based installation failed:', pythonError);
+
+        try {
+            // Try with python instead of python3
+            await execAsync('python --version');
+            await execAsync('python -m pip install --user yt-dlp');
+            await execAsync('python -m yt_dlp --version');
+
+            global.ytDlpPath = 'python -m yt_dlp';
+
+            console.log('Successfully installed yt-dlp via Python pip (using python command)');
+            return true;
+        } catch (altPythonError) {
+            console.error('Alternative Python installation failed:', altPythonError);
             return false;
         }
     }
 }
 
 /**
- * Retrieves video metadata from URL using the local yt-dlp installation
+ * Retrieves video metadata from URL using the available yt-dlp installation
  */
 export async function getVideoInfo(url: string, infoPath: string): Promise<any> {
     console.log('Fetching video metadata...');
 
-    // Use the stored path if available
-    const ytDlpCommand = global.ytDlpPath ? `"${global.ytDlpPath}"` : 'yt-dlp';
+    // Use the stored method if available
+    const ytDlpCommand = getYtDlpCommand();
 
     try {
         // Primary method: structured JSON output
@@ -132,14 +191,14 @@ export async function getVideoInfo(url: string, infoPath: string): Promise<any> 
 }
 
 /**
- * Downloads video with format prioritization using the local yt-dlp installation
+ * Downloads video with format prioritization using the available yt-dlp installation
  */
 export async function downloadVideo(url: string, outputPath: string): Promise<void> {
     console.log('Starting video download...');
     console.log('Output path:', outputPath);
 
-    // Use the stored path if available
-    const ytDlpCommand = global.ytDlpPath ? `"${global.ytDlpPath}"` : 'yt-dlp';
+    // Use the available command
+    const ytDlpCommand = getYtDlpCommand();
 
     // Get base filename without extension for consistent naming
     const baseOutputPath = outputPath.replace(/\.mp4$/, '');
@@ -161,13 +220,30 @@ export async function downloadVideo(url: string, outputPath: string): Promise<vo
 }
 
 /**
- * Attempts alternative download strategies using the local yt-dlp installation
+ * Helper function to get the proper yt-dlp command based on installation method
+ */
+function getYtDlpCommand(): string {
+    if (!global.ytDlpPath) {
+        return 'yt-dlp';
+    }
+
+    // If it's a Python module command
+    if (global.ytDlpPath.includes('python')) {
+        return global.ytDlpPath;
+    }
+
+    // Otherwise it's a path to the binary
+    return `"${global.ytDlpPath}"`;
+}
+
+/**
+ * Attempts alternative download strategies using the available yt-dlp installation
  */
 async function tryFallbackDownload(url: string, baseOutputPath: string): Promise<void> {
     console.log('Initiating fallback download methods...');
 
-    // Use the stored path if available
-    const ytDlpCommand = global.ytDlpPath ? `"${global.ytDlpPath}"` : 'yt-dlp';
+    // Use the available command
+    const ytDlpCommand = getYtDlpCommand();
 
     try {
         // First fallback: Try with merged format
