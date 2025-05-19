@@ -1,8 +1,5 @@
 import { execAsync } from '../utils/execute';
 import fs from 'fs';
-import path from 'path';
-import os from 'os';
-import { spawn } from 'child_process';
 
 /**
  * Augment the NodeJS global type to include ytDlpPath
@@ -13,48 +10,6 @@ declare global {
             ytDlpPath?: string;
             ytdlpInitialized?: boolean;
             nodeDownloader?: any; // Store the downloader directly in memory
-        }
-    }
-}
-
-/**
- * Detects the exact CPU architecture to download the correct binary
- */
-async function detectArchitecture(): Promise<string> {
-    try {
-        // Get detailed CPU information
-        const cpuInfo = await execAsync('cat /proc/cpuinfo');
-        console.log('CPU Info snippets:', cpuInfo.stdout.substring(0, 200) + '...');
-
-        // Look for architecture identifiers
-        if (cpuInfo.stdout.includes('aarch64') || cpuInfo.stdout.includes('ARM64')) {
-            return 'aarch64';
-        } else if (cpuInfo.stdout.includes('armv7') || cpuInfo.stdout.includes('ARM')) {
-            return 'armv7';
-        } else {
-            // Default to x86_64 which is most common
-            return 'x86_64';
-        }
-    } catch (error) {
-        console.log('Could not detect CPU architecture via /proc/cpuinfo, trying uname');
-
-        try {
-            const unameResult = await execAsync('uname -m');
-            console.log('uname -m result:', unameResult.stdout.trim());
-
-            if (unameResult.stdout.includes('aarch64')) {
-                return 'aarch64';
-            } else if (unameResult.stdout.includes('armv7')) {
-                return 'armv7';
-            } else if (unameResult.stdout.includes('x86_64')) {
-                return 'x86_64';
-            } else {
-                console.log('Using default x86_64 architecture');
-                return 'x86_64';
-            }
-        } catch (unameError) {
-            console.log('Architecture detection failed, defaulting to x86_64');
-            return 'x86_64';
         }
     }
 }
