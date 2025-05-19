@@ -13,7 +13,7 @@ export async function GET(
 ) {
   try {
     const filename = params.filename;
-    
+
     if (!filename) {
       return NextResponse.json({ error: 'Filename is required' }, { status: 400 });
     }
@@ -34,15 +34,15 @@ export async function GET(
 
     // Handle range requests for video streaming
     const range = request.headers.get('range');
-    
+
     if (range) {
       const parts = range.replace(/bytes=/, '').split('-');
       const start = parseInt(parts[0], 10);
       const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
       const chunkSize = end - start + 1;
-      
+
       const file = fs.createReadStream(filePath, { start, end });
-      
+
       // Note: This is only needed if you want to manually stream the file
       // Otherwise, Next.js static file serving will handle this
       const headers = {
@@ -52,7 +52,7 @@ export async function GET(
         'Content-Type': fileType,
       };
 
-      return new NextResponse(file as any, { 
+      return new NextResponse(file as any, {
         status: 206,
         headers: headers,
       });
