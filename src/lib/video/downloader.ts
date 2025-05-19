@@ -1,12 +1,13 @@
 import { execAsync } from '../utils/execute';
-import { TEMP_DIR, ensureTempDirectoryExists } from '../utils/file-system';
 import fs from 'fs';
 import path from 'path';
+
 
 /**
  * Ensures yt-dlp binary is available in the system
  * - First checks for existing installation
  * - Installs locally if missing with OS-specific strategies
+ * - Adds more robust fallback strategies for environments without pip
  */
 export async function ensureYtDlp(): Promise<boolean> {
     try {
@@ -17,42 +18,90 @@ export async function ensureYtDlp(): Promise<boolean> {
     } catch {
         console.log('yt-dlp not found. Attempting local installation...');
 
+        // Create bin directory if it doesn't exist
+        const binDir = path.join(process.cwd(), 'bin');
+        if (!fs.existsSync(binDir)) {
+            fs.mkdirSync(binDir, { recursive: true });
+        }
+
+        const isWindows = process.platform === 'win32';
+        const isMac = process.platform === 'darwin';
+        const ytDlpPath = isWindows
+            ? path.join(binDir, 'yt-dlp.exe')
+            : path.join(binDir, 'yt-dlp');
+
         try {
-            const isWindows = process.platform === 'win32';
-
+            // Direct binary download - works on all platforms
             if (isWindows) {
-                // Windows-specific installation: download executable directly
-                const binDir = path.join(process.cwd(), 'bin');
-                if (!fs.existsSync(binDir)) {
-                    fs.mkdirSync(binDir, { recursive: true });
-                }
-
-                const exePath = path.join(binDir, 'yt-dlp.exe');
-
-                // Try multiple download methods
+                // Windows download
                 try {
-                    // Primary: curl
-                    await execAsync(`curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe -o "${exePath}"`);
+                    await execAsync(`curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe -o "${ytDlpPath}"`);
                 } catch {
-                    // Fallback: PowerShell
-                    await execAsync(`powershell -Command "Invoke-WebRequest -Uri 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe' -OutFile '${exePath}'"`);
+                    await execAsync(`powershell -Command "Invoke-WebRequest -Uri 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe' -OutFile '${ytDlpPath}'"`);
+                }
+            } else {
+                // Linux/Mac download
+                try {
+                    await execAsync(`curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o "${ytDlpPath}"`);
+                } catch {
+                    await execAsync(`wget -O "${ytDlpPath}" https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp`);
                 }
 
-                // Extend PATH for current process
-                process.env.PATH = `${binDir}${path.delimiter}${process.env.PATH}`;
-                console.log('yt-dlp installed at:', exePath);
-            } else {
-                // Linux/macOS: install via pip
-                await execAsync('pip install yt-dlp');
-                console.log('yt-dlp installed via pip');
+                // Make executable
+                await execAsync(`chmod +x "${ytDlpPath}"`);
             }
 
-            // Final verification
+            // Add to PATH for current process
+            process.env.PATH = `${binDir}${path.delimiter}${process.env.PATH}`;
+            console.log(`yt-dlp installed at: ${ytDlpPath}`);
+
+            // Only attempt pip installation if direct download failed
+        } catch (directDownloadError) {
+            console.log('Direct download failed, trying alternative methods...');
+
+            try {
+                // Try pip3 first (more common on modern systems)
+                await execAsync('pip3 install yt-dlp');
+                console.log('yt-dlp installed via pip3');
+            } catch (pip3Error) {
+                try {
+                    // Fallback to pip
+                    await execAsync('pip install yt-dlp');
+                    console.log('yt-dlp installed via pip');
+                } catch (pipError) {
+                    try {
+                        // Try with python -m pip
+                        await execAsync('python -m pip install yt-dlp');
+                        console.log('yt-dlp installed via python -m pip');
+                    } catch (pythonPipError) {
+                        try {
+                            // Try with python3 -m pip
+                            await execAsync('python3 -m pip install yt-dlp');
+                            console.log('yt-dlp installed via python3 -m pip');
+                        } catch (python3PipError) {
+                            console.error('All installation methods failed');
+                            console.error(directDownloadError);
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Final verification
+        try {
             await execAsync('yt-dlp --version');
             return true;
-        } catch (installError) {
-            console.error('Installation failed:', installError);
-            return false;
+        } catch (verificationError) {
+            // Check if we have our local copy and try to verify that instead
+            try {
+                await execAsync(`"${ytDlpPath}" --version`);
+                console.log(`Local yt-dlp verified at: ${ytDlpPath}`);
+                return true;
+            } catch (localVerificationError) {
+                console.error('Installation verification failed:', verificationError);
+                return false;
+            }
         }
     }
 }
