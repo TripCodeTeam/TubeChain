@@ -7,13 +7,13 @@ import { TEMP_DIR } from '@/lib/utils/file-system';
  * API Route for serving video files
  * This is necessary if videos need additional protection or processing
  */
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { filename: string } }
-) {
+export async function GET(request: NextRequest) {
   try {
-    const filename = params.filename;
-
+    // Extract filename from the URL path
+    const url = new URL(request.url);
+    const pathParts = url.pathname.split('/');
+    const filename = pathParts[pathParts.length - 1];
+    
     if (!filename) {
       return NextResponse.json({ error: 'Filename is required' }, { status: 400 });
     }
@@ -34,15 +34,15 @@ export async function GET(
 
     // Handle range requests for video streaming
     const range = request.headers.get('range');
-
+    
     if (range) {
       const parts = range.replace(/bytes=/, '').split('-');
       const start = parseInt(parts[0], 10);
       const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
       const chunkSize = end - start + 1;
-
+      
       const file = fs.createReadStream(filePath, { start, end });
-
+      
       // Note: This is only needed if you want to manually stream the file
       // Otherwise, Next.js static file serving will handle this
       const headers = {
