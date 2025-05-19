@@ -1,13 +1,13 @@
 import { execAsync } from '../utils/execute';
 import fs from 'fs';
 import path from 'path';
-
+import os from 'os';
 
 /**
  * Ensures yt-dlp binary is available in the system
  * - First checks for existing installation
  * - Installs locally if missing with OS-specific strategies
- * - Adds more robust fallback strategies for environments without pip
+ * - Uses system temp directory for Vercel serverless environment
  */
 export async function ensureYtDlp(): Promise<boolean> {
     try {
@@ -18,10 +18,17 @@ export async function ensureYtDlp(): Promise<boolean> {
     } catch {
         console.log('yt-dlp not found. Attempting local installation...');
 
-        // Create bin directory if it doesn't exist
-        const binDir = path.join(process.cwd(), 'bin');
-        if (!fs.existsSync(binDir)) {
-            fs.mkdirSync(binDir, { recursive: true });
+        // Create bin directory in the system temp directory
+        const tempDir = os.tmpdir();
+        const binDir = path.join(tempDir, 'app-bin');
+
+        try {
+            if (!fs.existsSync(binDir)) {
+                fs.mkdirSync(binDir, { recursive: true });
+            }
+        } catch (mkdirError) {
+            console.error('Failed to create bin directory:', mkdirError);
+            return false;
         }
 
         const isWindows = process.platform === 'win32';

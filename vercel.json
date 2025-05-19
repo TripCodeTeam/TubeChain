@@ -1,0 +1,7 @@
+{
+  "functions": {
+    "api/download/route.js": {
+      "maxDuration": 60
+    }
+  }
+}

@@ -8,25 +8,40 @@ export const TEMP_DIR = process.env.NODE_ENV === 'production'
   ? path.join(os.tmpdir(), 'app-temp') // Use system temp directory in production
   : path.join(process.cwd(), 'public', 'temp'); // Use local temp in development
 
+
 /**
  * Ensures the temporary directory exists
  * Creates directory recursively if it doesn't exist
  */
 export function ensureTempDirectoryExists(): void {
-  if (!fs.existsSync(TEMP_DIR)) {
-    fs.mkdirSync(TEMP_DIR, { recursive: true });
+  try {
+    if (!fs.existsSync(TEMP_DIR)) {
+      fs.mkdirSync(TEMP_DIR, { recursive: true });
+      console.log(`Created temp directory: ${TEMP_DIR}`);
+    }
+  } catch (error) {
+    console.error(`Error creating temp directory ${TEMP_DIR}:`, error);
+    // Log detailed error information
+    if (error instanceof Error) {
+      console.error(`Error name: ${error.name}, message: ${error.message}`);
+      console.error(`Stack trace: ${error.stack}`);
+    }
   }
 }
 
-// Ensure the directory exists
+// Ensure the directory exists with better error handling
 export function ensureDirExists(dirPath: string) {
-  if (!fs.existsSync(dirPath)) {
-    try {
+  try {
+    if (!fs.existsSync(dirPath)) {
       fs.mkdirSync(dirPath, { recursive: true });
       console.log(`Created directory: ${dirPath}`);
-    } catch (error) {
-      console.error(`Failed to create directory ${dirPath}:`, error);
-      // Continue execution - we'll handle file errors separately
+    }
+  } catch (error) {
+    console.error(`Failed to create directory ${dirPath}:`, error);
+    // Log detailed error for debugging
+    if (error instanceof Error) {
+      console.error(`Error name: ${error.name}, message: ${error.message}`);
+      console.error(`Stack trace: ${error.stack}`);
     }
   }
 }
@@ -35,9 +50,11 @@ export function ensureDirExists(dirPath: string) {
  * Cleans up old temporary files from disk
  * - Preserves files younger than 1 hour
  * - Uses rimraf for cross-platform compatibility
+ * - Improved error handling for serverless environments
  */
 export async function cleanTempDirectory(): Promise<void> {
   try {
+    // First ensure the directory exists
     ensureTempDirectoryExists();
 
     const files = fs.readdirSync(TEMP_DIR);
@@ -61,6 +78,7 @@ export async function cleanTempDirectory(): Promise<void> {
     console.log('Temporary directory cleanup complete');
   } catch (error) {
     console.error('Failed to clean temporary directory:', error);
+    // Continue execution - non-critical operation
   }
 }
 
@@ -82,17 +100,22 @@ export function generateSafeFilename(title: string, timestamp: number): string {
  * @param targetFilename - File to preserve
  */
 export function cleanExtraFiles(baseFilename: string, targetFilename: string): void {
-  const extraFiles = fs.readdirSync(TEMP_DIR).filter(file =>
-    file !== targetFilename &&
-    file.includes(baseFilename)
-  );
+  try {
+    const extraFiles = fs.readdirSync(TEMP_DIR).filter(file =>
+      file !== targetFilename &&
+      file.includes(baseFilename)
+    );
 
-  extraFiles.forEach(file => {
-    try {
-      fs.unlinkSync(path.join(TEMP_DIR, file));
-      console.log('Removed residual temp file:', file);
-    } catch (err) {
-      console.error('Failed to remove temp file:', err);
-    }
-  });
+    extraFiles.forEach(file => {
+      try {
+        fs.unlinkSync(path.join(TEMP_DIR, file));
+        console.log('Removed residual temp file:', file);
+      } catch (err) {
+        console.error('Failed to remove temp file:', err);
+      }
+    });
+  } catch (error) {
+    console.error('Error in cleanExtraFiles:', error);
+    // Non-critical operation, continue execution
+  }
 }
