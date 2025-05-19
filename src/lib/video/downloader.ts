@@ -4,10 +4,17 @@ import path from 'path';
 import os from 'os';
 
 /**
+ * Augment the NodeJS global type to include ytDlpPath
+ */
+declare global {
+    // eslint-disable-next-line no-var
+    var ytDlpPath: string | undefined;
+}
+
+/**
  * Ensures yt-dlp binary is available in the system
- * - First checks for existing installation
- * - Installs locally if missing with OS-specific strategies
- * - Uses system temp directory for Vercel serverless environment
+ * - Uses standalone binary that doesn't require Python
+ * - Works in environments without Python installed (like Vercel)
  */
 export async function ensureYtDlp(): Promise<boolean> {
     try {
@@ -18,16 +25,18 @@ export async function ensureYtDlp(): Promise<boolean> {
     } catch {
         console.log('yt-dlp not found. Attempting local installation...');
 
-        // Create bin directory in the system temp directory
-        const tempDir = os.tmpdir();
-        const binDir = path.join(tempDir, 'app-bin');
+        // Create bin directory based on environment
+        const binDir = process.env.NODE_ENV === 'production'
+            ? path.join(os.tmpdir(), 'app-bin') // Use system temp in production
+            : path.join(process.cwd(), 'bin');  // Use local bin in development
 
         try {
             if (!fs.existsSync(binDir)) {
                 fs.mkdirSync(binDir, { recursive: true });
+                console.log(`Created bin directory at: ${binDir}`);
             }
         } catch (mkdirError) {
-            console.error('Failed to create bin directory:', mkdirError);
+            console.error(`Failed to create bin directory at ${binDir}:`, mkdirError);
             return false;
         }
 
@@ -38,8 +47,11 @@ export async function ensureYtDlp(): Promise<boolean> {
             : path.join(binDir, 'yt-dlp');
 
         try {
-            // Direct binary download - works on all platforms
-            if (isWindows) {
+            // Use the standalone binary version for Linux environments (like Vercel)
+            if (!isWindows && !isMac && process.env.NODE_ENV === 'production') {
+                console.log('Downloading standalone binary for Linux...');
+                await execAsync(`curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux -o "${ytDlpPath}"`);
+            } else if (isWindows) {
                 // Windows download
                 try {
                     await execAsync(`curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe -o "${ytDlpPath}"`);
@@ -47,14 +59,16 @@ export async function ensureYtDlp(): Promise<boolean> {
                     await execAsync(`powershell -Command "Invoke-WebRequest -Uri 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe' -OutFile '${ytDlpPath}'"`);
                 }
             } else {
-                // Linux/Mac download
+                // Mac/other Linux download
                 try {
                     await execAsync(`curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o "${ytDlpPath}"`);
                 } catch {
                     await execAsync(`wget -O "${ytDlpPath}" https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp`);
                 }
+            }
 
-                // Make executable
+            // Make executable
+            if (!isWindows) {
                 await execAsync(`chmod +x "${ytDlpPath}"`);
             }
 
@@ -62,75 +76,46 @@ export async function ensureYtDlp(): Promise<boolean> {
             process.env.PATH = `${binDir}${path.delimiter}${process.env.PATH}`;
             console.log(`yt-dlp installed at: ${ytDlpPath}`);
 
-            // Only attempt pip installation if direct download failed
         } catch (directDownloadError) {
-            console.log('Direct download failed, trying alternative methods...');
-
-            try {
-                // Try pip3 first (more common on modern systems)
-                await execAsync('pip3 install yt-dlp');
-                console.log('yt-dlp installed via pip3');
-            } catch (pip3Error) {
-                try {
-                    // Fallback to pip
-                    await execAsync('pip install yt-dlp');
-                    console.log('yt-dlp installed via pip');
-                } catch (pipError) {
-                    try {
-                        // Try with python -m pip
-                        await execAsync('python -m pip install yt-dlp');
-                        console.log('yt-dlp installed via python -m pip');
-                    } catch (pythonPipError) {
-                        try {
-                            // Try with python3 -m pip
-                            await execAsync('python3 -m pip install yt-dlp');
-                            console.log('yt-dlp installed via python3 -m pip');
-                        } catch (python3PipError) {
-                            console.error('All installation methods failed');
-                            console.error(directDownloadError);
-                            return false;
-                        }
-                    }
-                }
-            }
+            console.error('Download error details:', directDownloadError);
+            return false;
         }
 
-        // Final verification
+        // Final verification - use direct path instead of relying on PATH
         try {
-            await execAsync('yt-dlp --version');
+            await execAsync(`"${ytDlpPath}" --version`);
+            console.log(`Local yt-dlp verified at: ${ytDlpPath}`);
+
+            // Save the path for later use
+            global.ytDlpPath = ytDlpPath;
+
             return true;
         } catch (verificationError) {
-            // Check if we have our local copy and try to verify that instead
-            try {
-                await execAsync(`"${ytDlpPath}" --version`);
-                console.log(`Local yt-dlp verified at: ${ytDlpPath}`);
-                return true;
-            } catch (localVerificationError) {
-                console.error('Installation verification failed:', verificationError);
-                return false;
-            }
+            console.error('Installation verification failed:', verificationError);
+            return false;
         }
     }
 }
 
 /**
- * Retrieves video metadata from URL
- * - First attempts JSON format output
- * - Falls back to plain text extraction if needed
+ * Retrieves video metadata from URL using the local yt-dlp installation
  */
 export async function getVideoInfo(url: string, infoPath: string): Promise<any> {
     console.log('Fetching video metadata...');
 
+    // Use the stored path if available
+    const ytDlpCommand = global.ytDlpPath ? `"${global.ytDlpPath}"` : 'yt-dlp';
+
     try {
         // Primary method: structured JSON output
-        await execAsync(`yt-dlp "${url}" --dump-json --no-check-certificate --no-warnings > "${infoPath}"`);
+        await execAsync(`${ytDlpCommand} "${url}" --dump-json --no-check-certificate --no-warnings > "${infoPath}"`);
 
         return JSON.parse(fs.readFileSync(infoPath, 'utf8'));
-    } catch {
-        console.log('JSON parsing failed. Using text-based extraction...');
+    } catch (error) {
+        console.log('JSON parsing failed. Using text-based extraction...', error);
 
         // Fallback method: raw field extraction
-        await execAsync(`yt-dlp "${url}" --print title --print thumbnail --print duration --print uploader --no-check-certificate --no-warnings > "${infoPath}.txt"`);
+        await execAsync(`${ytDlpCommand} "${url}" --print title --print thumbnail --print duration --print uploader --no-check-certificate --no-warnings > "${infoPath}.txt"`);
 
         const rawFields = fs.readFileSync(`${infoPath}.txt`, 'utf8').split('\n').filter(Boolean);
 
@@ -147,13 +132,14 @@ export async function getVideoInfo(url: string, infoPath: string): Promise<any> 
 }
 
 /**
- * Downloads video with format prioritization
- * - Uses explicit format selection for best quality with audio
- * - Sets a consistent output template to help with file tracking
+ * Downloads video with format prioritization using the local yt-dlp installation
  */
 export async function downloadVideo(url: string, outputPath: string): Promise<void> {
     console.log('Starting video download...');
     console.log('Output path:', outputPath);
+
+    // Use the stored path if available
+    const ytDlpCommand = global.ytDlpPath ? `"${global.ytDlpPath}"` : 'yt-dlp';
 
     // Get base filename without extension for consistent naming
     const baseOutputPath = outputPath.replace(/\.mp4$/, '');
@@ -161,7 +147,7 @@ export async function downloadVideo(url: string, outputPath: string): Promise<vo
     try {
         // Format selection prioritizing audio and video quality
         // Using consistent output template for better tracking
-        const command = `yt-dlp "${url}" -f "bestvideo+bestaudio/best" --merge-output-format mp4 -o "${baseOutputPath}.%(ext)s" --no-check-certificate --no-warnings`;
+        const command = `${ytDlpCommand} "${url}" -f "bestvideo+bestaudio/best" --merge-output-format mp4 -o "${baseOutputPath}.%(ext)s" --no-check-certificate --no-warnings`;
         console.log('Executing command:', command);
 
         await execAsync(command);
@@ -175,16 +161,17 @@ export async function downloadVideo(url: string, outputPath: string): Promise<vo
 }
 
 /**
- * Attempts alternative download strategies
- * - Uses progressive fallbacks with more permissive format options
- * - Maintains consistent output template pattern
+ * Attempts alternative download strategies using the local yt-dlp installation
  */
 async function tryFallbackDownload(url: string, baseOutputPath: string): Promise<void> {
     console.log('Initiating fallback download methods...');
 
+    // Use the stored path if available
+    const ytDlpCommand = global.ytDlpPath ? `"${global.ytDlpPath}"` : 'yt-dlp';
+
     try {
         // First fallback: Try with merged format
-        await execAsync(`yt-dlp "${url}" -f "best" -o "${baseOutputPath}.%(ext)s" --no-check-certificate --no-warnings`);
+        await execAsync(`${ytDlpCommand} "${url}" -f "best" -o "${baseOutputPath}.%(ext)s" --no-check-certificate --no-warnings`);
 
         // If first fallback fails, try with specific audio/video format combo
         const files = fs.readdirSync(path.dirname(baseOutputPath));
@@ -193,7 +180,7 @@ async function tryFallbackDownload(url: string, baseOutputPath: string): Promise
 
         if (!downloadedFile) {
             // Second fallback: More explicit about audio
-            await execAsync(`yt-dlp "${url}" -f "bestvideo+bestaudio" --audio-format mp3 --prefer-ffmpeg -o "${baseOutputPath}.%(ext)s" --no-check-certificate --no-warnings`);
+            await execAsync(`${ytDlpCommand} "${url}" -f "bestvideo+bestaudio" --audio-format mp3 --prefer-ffmpeg -o "${baseOutputPath}.%(ext)s" --no-check-certificate --no-warnings`);
         }
     } catch (fallbackError) {
         console.error('Fallback methods failed:', fallbackError);
