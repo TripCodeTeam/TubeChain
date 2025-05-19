@@ -77,13 +77,13 @@ export async function POST(request: NextRequest) {
         // Get the best available thumbnail
         const thumbnail = getBestThumbnail(info.thumbnails || []) || info.thumbnail || '';
 
-        // Generate output filename and path
-        const filename = generateSafeFilename(info.title, timestamp);
-        const outputPath = path.join(TEMP_DIR, filename);
+        // Generate output filename and path (base name without extension)
+        const baseName = generateSafeFilename(info.title, timestamp).replace(/\.mp4$/, '');
+        const expectedOutputPath = path.join(TEMP_DIR, `${baseName}.mp4`);
 
         // Download the video
         try {
-            await downloadVideo(url, outputPath);
+            await downloadVideo(url, expectedOutputPath);
         } catch (error) {
             console.error('Error downloading video:', error);
             return NextResponse.json({
@@ -92,13 +92,32 @@ export async function POST(request: NextRequest) {
             }, { status: 500 });
         }
 
-        // Verify downloaded file exists
-        if (!fs.existsSync(outputPath)) {
-            throw new Error('Downloaded file was not found');
+        // Find the actual downloaded file by searching for the base name pattern
+        let actualFilePath = expectedOutputPath;
+        let fileExists = fs.existsSync(actualFilePath);
+
+        if (!fileExists) {
+            // Search for files matching the base name pattern
+            const files = fs.readdirSync(TEMP_DIR);
+            const matchingFile = files.find(file => file.startsWith(baseName));
+
+            if (matchingFile) {
+                actualFilePath = path.join(TEMP_DIR, matchingFile);
+                fileExists = true;
+                console.log(`Found matching file: ${matchingFile}`);
+            }
+        }
+
+        // Final verification that we found a file
+        if (!fileExists) {
+            return NextResponse.json({
+                error: 'Downloaded file was not found after successful download attempt',
+                details: `Expected at path: ${expectedOutputPath}`
+            }, { status: 500 });
         }
 
         // Calculate file size
-        const fileSize = calculateFileSize(outputPath);
+        const fileSize = calculateFileSize(actualFilePath);
 
         // Remove temporary metadata file
         if (fs.existsSync(infoPath)) {
@@ -107,12 +126,15 @@ export async function POST(request: NextRequest) {
 
         // Clean up extra temporary files related to this download
         const safeTitle = info.title.replace(/[^\w]/g, '_').replace(/_+/g, '_');
-        cleanExtraFiles(safeTitle, filename);
+        cleanExtraFiles(safeTitle, path.basename(actualFilePath));
+
+        // Get actual filename that will be used in the response
+        const actualFilename = path.basename(actualFilePath);
 
         // Prepare response payload
         const response: VideoInfo = {
             title: info.title,
-            filename: filename,
+            filename: actualFilename,
             thumbnail: thumbnail,
             duration: info.duration,
             uploader: info.uploader,

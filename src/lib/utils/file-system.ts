@@ -3,7 +3,8 @@ import path from 'path';
 import { rimraf } from 'rimraf';
 
 // Directory for storing temporary video files
-export const TEMP_DIR = path.join(process.cwd(), 'temp');
+// Changed from 'temp' to 'public/temp' for Next.js accessibility
+export const TEMP_DIR = path.join(process.cwd(), 'public', 'temp');
 
 /**
  * Ensures the temporary directory exists
@@ -26,7 +27,7 @@ export async function cleanTempDirectory(): Promise<void> {
     
     const files = fs.readdirSync(TEMP_DIR);
     const oneHourAgo = Date.now() - (60 * 60 * 1000); // Files older than 1 hour
-
+    
     for (const file of files) {
       const filePath = path.join(TEMP_DIR, file);
       
@@ -41,7 +42,7 @@ export async function cleanTempDirectory(): Promise<void> {
         console.error(`Error processing file ${file}:`, err);
       }
     }
-
+    
     console.log('Temporary directory cleanup complete');
   } catch (error) {
     console.error('Failed to clean temporary directory:', error);
@@ -67,7 +68,7 @@ export function generateSafeFilename(title: string, timestamp: number): string {
  */
 export function cleanExtraFiles(baseFilename: string, targetFilename: string): void {
   const extraFiles = fs.readdirSync(TEMP_DIR).filter(file => 
-    file !== targetFilename && 
+    file !== targetFilename &&
     file.includes(baseFilename)
   );
   

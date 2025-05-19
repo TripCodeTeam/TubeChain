@@ -1,49 +1,79 @@
 import { NextRequest, NextResponse } from 'next/server';
-import fs from 'fs';
 import path from 'path';
-
-// Define temporary directory path for file storage
-const TEMP_DIR = path.join(process.cwd(), 'temp');
+import fs from 'fs';
+import { TEMP_DIR } from '@/lib/utils/file-system';
 
 /**
- * Handles GET requests to stream video files from the temp directory
- * - Validates filename parameter
- * - Prevents path traversal attacks
- * - Streams file content with proper download headers
+ * API Route for serving video files
+ * This is necessary if videos need additional protection or processing
  */
-export async function GET(request: NextRequest) {
-    try {
-        const url = new URL(request.url);
-        const filename = url.searchParams.get('filename');
-
-        if (!filename) {
-            return NextResponse.json({ error: 'Filename parameter is required' }, { status: 400 });
-        }
-
-        // Sanitize filename to prevent directory traversal
-        const sanitizedFilename = path.basename(filename);
-        const filePath = path.join(TEMP_DIR, sanitizedFilename);
-
-        // Verify file exists before attempting to stream
-        if (!fs.existsSync(filePath)) {
-            return NextResponse.json({ error: 'File not found' }, { status: 404 });
-        }
-
-        // Read file into buffer for streaming
-        const fileBuffer = fs.readFileSync(filePath);
-
-        // Set headers for file download
-        const headers = new Headers();
-        headers.set('Content-Disposition', `attachment; filename="${sanitizedFilename}"`);
-        headers.set('Content-Type', 'video/mp4');
-
-        // Return streaming response
-        return new NextResponse(fileBuffer, {
-            status: 200,
-            headers,
-        });
-    } catch (error) {
-        console.error('Unexpected error during file streaming:', error);
-        return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+export async function GET(
+  request: NextRequest,
+  { params }: { params: { filename: string } }
+) {
+  try {
+    const filename = params.filename;
+    
+    if (!filename) {
+      return NextResponse.json({ error: 'Filename is required' }, { status: 400 });
     }
+
+    // Prevent path traversal attacks
+    const sanitizedFilename = path.basename(filename);
+    const filePath = path.join(TEMP_DIR, sanitizedFilename);
+
+    // Check if file exists
+    if (!fs.existsSync(filePath)) {
+      return NextResponse.json({ error: 'File not found' }, { status: 404 });
+    }
+
+    // Get file stats
+    const stat = fs.statSync(filePath);
+    const fileSize = stat.size;
+    const fileType = 'video/mp4';
+
+    // Handle range requests for video streaming
+    const range = request.headers.get('range');
+    
+    if (range) {
+      const parts = range.replace(/bytes=/, '').split('-');
+      const start = parseInt(parts[0], 10);
+      const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+      const chunkSize = end - start + 1;
+      
+      const file = fs.createReadStream(filePath, { start, end });
+      
+      // Note: This is only needed if you want to manually stream the file
+      // Otherwise, Next.js static file serving will handle this
+      const headers = {
+        'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+        'Accept-Ranges': 'bytes',
+        'Content-Length': chunkSize.toString(),
+        'Content-Type': fileType,
+      };
+
+      return new NextResponse(file as any, { 
+        status: 206,
+        headers: headers,
+      });
+    } else {
+      // If no range requested, serve entire file
+      const headers = {
+        'Content-Length': fileSize.toString(),
+        'Content-Type': fileType,
+      };
+
+      const file = fs.readFileSync(filePath);
+      return new NextResponse(file, {
+        status: 200,
+        headers: headers,
+      });
+    }
+  } catch (error) {
+    console.error('Error serving video:', error);
+    return NextResponse.json({
+      error: 'Failed to serve video file',
+      details: error instanceof Error ? error.message : String(error)
+    }, { status: 500 });
+  }
 }
