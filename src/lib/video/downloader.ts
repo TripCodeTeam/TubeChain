@@ -8,9 +8,12 @@ import { spawn } from 'child_process';
  * Augment the NodeJS global type to include ytDlpPath
  */
 declare global {
-    // eslint-disable-next-line no-var
-    var ytDlpPath: string | undefined;
-    var ytdlpInitialized: boolean | undefined;
+    namespace NodeJS {
+        interface Global {
+            ytDlpPath?: string;
+            ytdlpInitialized?: boolean;
+        }
+    }
 }
 
 /**
@@ -214,8 +217,8 @@ module.exports = { getVideoInfo, downloadVideo };
         console.log(`Created Node.js based downloader at ${downloaderPath}`);
 
         // Set the global path to use our Node.js script
-        global.ytDlpPath = 'node ' + downloaderPath;
-        global.ytdlpInitialized = true;
+        (global as NodeJS.Global).ytDlpPath = 'node ' + downloaderPath;
+        (global as NodeJS.Global).ytdlpInitialized = true;
 
         return true;
     } catch (error) {
@@ -231,7 +234,7 @@ module.exports = { getVideoInfo, downloadVideo };
  */
 export async function ensureYtDlp(): Promise<boolean> {
     // If already initialized, don't repeat
-    if (global.ytdlpInitialized) {
+    if ((global as NodeJS.Global).ytdlpInitialized) {
         return true;
     }
 
@@ -239,7 +242,7 @@ export async function ensureYtDlp(): Promise<boolean> {
         // Verify existing installation
         await execAsync('yt-dlp --version');
         console.log('yt-dlp is already installed.');
-        global.ytdlpInitialized = true;
+        (global as NodeJS.Global).ytdlpInitialized = true;
         return true;
     } catch {
         console.log('yt-dlp not found. Attempting local installation...');
@@ -285,8 +288,8 @@ export async function ensureYtDlp(): Promise<boolean> {
                     await execAsync(`"${ytDlpPath}" --version`);
                     console.log(`Binary for ${architecture} works!`);
 
-                    global.ytDlpPath = ytDlpPath;
-                    global.ytdlpInitialized = true;
+                    (global as NodeJS.Global).ytDlpPath = ytDlpPath;
+                    (global as NodeJS.Global).ytdlpInitialized = true;
                     binarySuccess = true;
                     break;
                 } catch (verifyError) {
@@ -352,8 +355,8 @@ rm "$output.html"
                 fs.writeFileSync(shellScriptPath, shellScript);
                 await execAsync(`chmod +x "${shellScriptPath}"`);
 
-                global.ytDlpPath = shellScriptPath;
-                global.ytdlpInitialized = true;
+                (global as NodeJS.Global).ytDlpPath = shellScriptPath;
+                (global as NodeJS.Global).ytdlpInitialized = true;
                 console.log('Created shell script fallback at:', shellScriptPath);
                 return true;
             } catch (shellError) {
@@ -373,15 +376,15 @@ export async function getVideoInfo(url: string, infoPath: string): Promise<any> 
     console.log('Fetching video metadata...');
 
     // Ensure we have a downloader
-    if (!global.ytdlpInitialized) {
+    if (!(global as NodeJS.Global).ytdlpInitialized) {
         await ensureYtDlp();
     }
 
     // Handle Node.js downloader method
-    if (global.ytDlpPath && global.ytDlpPath.includes('node-ytdl.js')) {
+    if (typeof (global as NodeJS.Global).ytDlpPath === 'string' && (global as NodeJS.Global).ytDlpPath && ((global as NodeJS.Global).ytDlpPath?.includes('node-ytdl.js'))) {
         try {
             // Dynamically load the Node.js downloader
-            const downloaderPath = global.ytDlpPath.split(' ')[1];
+            const downloaderPath = ((global as NodeJS.Global).ytDlpPath as string).split(' ')[1];
             const nodeDownloader = require(downloaderPath);
 
             // Use the Node.js downloader to get video info
@@ -398,9 +401,9 @@ export async function getVideoInfo(url: string, infoPath: string): Promise<any> 
     }
 
     // Handle shell script method
-    if (global.ytDlpPath && global.ytDlpPath.includes('yt-dlp-curl.sh')) {
+    if (((global as NodeJS.Global).ytDlpPath ?? '').includes('yt-dlp-curl.sh')) {
         try {
-            await execAsync(`"${global.ytDlpPath}" "${url}" "dummy.mp4" "${infoPath}"`);
+            await execAsync(`"${(global as NodeJS.Global).ytDlpPath}" "${url}" "dummy.mp4" "${infoPath}"`);
             return JSON.parse(fs.readFileSync(infoPath, 'utf8'));
         } catch (shellError) {
             console.error('Shell script downloader failed:', shellError);
@@ -422,7 +425,7 @@ export async function getVideoInfo(url: string, infoPath: string): Promise<any> 
     // Standard yt-dlp binary approach
     try {
         // Use the stored path if available
-        const ytDlpCommand = global.ytDlpPath ? `"${global.ytDlpPath}"` : 'yt-dlp';
+        const ytDlpCommand = (global as NodeJS.Global).ytDlpPath ? `"${(global as NodeJS.Global).ytDlpPath}"` : 'yt-dlp';
 
         // Primary method: structured JSON output
         await execAsync(`${ytDlpCommand} "${url}" --dump-json --no-check-certificate --no-warnings > "${infoPath}"`);
@@ -433,7 +436,7 @@ export async function getVideoInfo(url: string, infoPath: string): Promise<any> 
 
         try {
             // Fallback method: raw field extraction
-            const ytDlpCommand = global.ytDlpPath ? `"${global.ytDlpPath}"` : 'yt-dlp';
+            const ytDlpCommand = (global as NodeJS.Global).ytDlpPath ? `"${(global as NodeJS.Global).ytDlpPath}"` : 'yt-dlp';
             await execAsync(`${ytDlpCommand} "${url}" --print title --print thumbnail --print duration --print uploader --no-check-certificate --no-warnings > "${infoPath}.txt"`);
 
             const rawFields = fs.readFileSync(`${infoPath}.txt`, 'utf8').split('\n').filter(Boolean);
@@ -473,15 +476,15 @@ export async function downloadVideo(url: string, outputPath: string): Promise<vo
     console.log('Output path:', outputPath);
 
     // Ensure we have a downloader
-    if (!global.ytdlpInitialized) {
+    if (!(global as NodeJS.Global).ytdlpInitialized) {
         await ensureYtDlp();
     }
 
     // Handle Node.js downloader method
-    if (global.ytDlpPath && global.ytDlpPath.includes('node-ytdl.js')) {
+    if (((global as NodeJS.Global).ytDlpPath ?? '').includes('node-ytdl.js')) {
         try {
             // Dynamically load the Node.js downloader
-            const downloaderPath = global.ytDlpPath.split(' ')[1];
+            const downloaderPath = ((global as NodeJS.Global).ytDlpPath as string).split(' ')[1];
             const nodeDownloader = require(downloaderPath);
 
             // Use the Node.js downloader
@@ -494,10 +497,10 @@ export async function downloadVideo(url: string, outputPath: string): Promise<vo
     }
 
     // Handle shell script method
-    if (global.ytDlpPath && global.ytDlpPath.includes('yt-dlp-curl.sh')) {
+    if ((global as NodeJS.Global).ytDlpPath?.includes('yt-dlp-curl.sh')) {
         try {
             // The third parameter is for info JSON but it's not important here
-            await execAsync(`"${global.ytDlpPath}" "${url}" "${outputPath}" "${outputPath}.info.json"`);
+            await execAsync(`"${(global as NodeJS.Global).ytDlpPath}" "${url}" "${outputPath}" "${outputPath}.info.json"`);
             return;
         } catch (shellError) {
             console.error('Shell script downloader failed:', shellError);
@@ -506,7 +509,7 @@ export async function downloadVideo(url: string, outputPath: string): Promise<vo
     }
 
     // Standard yt-dlp binary approach
-    const ytDlpCommand = global.ytDlpPath ? `"${global.ytDlpPath}"` : 'yt-dlp';
+    const ytDlpCommand = (global as NodeJS.Global).ytDlpPath ? `"${(global as NodeJS.Global).ytDlpPath}"` : 'yt-dlp';
 
     // Get base filename without extension for consistent naming
     const baseOutputPath = outputPath.replace(/\.mp4$/, '');
@@ -533,7 +536,7 @@ async function tryFallbackDownload(url: string, baseOutputPath: string): Promise
     console.log('Initiating fallback download methods...');
 
     // Use the stored path if available
-    const ytDlpCommand = global.ytDlpPath ? `"${global.ytDlpPath}"` : 'yt-dlp';
+    const ytDlpCommand = (global as NodeJS.Global).ytDlpPath ? `"${(global as NodeJS.Global).ytDlpPath}"` : 'yt-dlp';
 
     try {
         // First fallback: Try with merged format
