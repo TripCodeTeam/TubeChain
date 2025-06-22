@@ -1,371 +1,334 @@
-import { execAsync } from '../utils/execute';
+import youtubeDl from 'youtube-dl-exec';
 import fs from 'fs';
 
 /**
- * Augment the NodeJS global type to include ytDlpPath
+ * Augment the NodeJS global type
  */
 declare global {
     namespace NodeJS {
         interface Global {
-            ytDlpPath?: string;
             ytdlpInitialized?: boolean;
-            nodeDownloader?: any; // Store the downloader directly in memory
+            ytdlpInstance?: typeof youtubeDl;
         }
     }
 }
 
 /**
- * Creates a Node-based downloader and loads it directly into memory
- * Avoids file system dependency issues in serverless environments
+ * Interface for video metadata
  */
-function createInMemoryDownloader(): any {
-    console.log('Creating in-memory Node.js downloader');
-
-    // Simple YouTube downloader functions
-    const nodeDownloader = {
-        getVideoInfo: async function (url: string): Promise<any> {
-            console.log('Getting video info with in-memory downloader');
-
-            // Extract video ID from URL
-            const videoId = extractVideoId(url);
-            if (!videoId) {
-                throw new Error('Invalid YouTube URL');
-            }
-
-            try {
-                // Try to get some basic info about the video
-                const response = await fetch(`https://www.youtube.com/oembed?url=${encodeURIComponent(url)}&format=json`);
-
-                if (response.ok) {
-                    const data = await response.json();
-                    return {
-                        title: data.title || `YouTube Video ${videoId}`,
-                        thumbnail: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
-                        uploader: data.author_name || 'Unknown',
-                        duration: 0,
-                        videoId
-                    };
-                }
-            } catch (error) {
-                console.log('Error fetching oembed data:', error);
-            }
-
-            // Fallback to minimal info if oembed fails
-            return {
-                title: `YouTube Video ${videoId}`,
-                thumbnail: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
-                uploader: 'Unknown',
-                duration: 0,
-                videoId
-            };
-        },
-
-        downloadVideo: async function (url: string, outputPath: string): Promise<void> {
-            console.log('Downloading video with in-memory downloader');
-            const videoId = extractVideoId(url);
-            if (!videoId) {
-                throw new Error('Invalid YouTube URL');
-            }
-
-            try {
-                // Approach 1: Try using the Invidious API
-                const invidiousInstances = [
-                    'https://invidious.snopyta.org',
-                    'https://invidious.kavin.rocks',
-                    'https://vid.puffyan.us'
-                ];
-
-                for (const instance of invidiousInstances) {
-                    try {
-                        console.log(`Trying Invidious instance: ${instance}`);
-                        const apiUrl = `${instance}/api/v1/videos/${videoId}`;
-                        const response = await fetch(apiUrl);
-
-                        if (response.ok) {
-                            const data = await response.json();
-                            if (data.formatStreams && data.formatStreams.length > 0) {
-                                // Find a good quality stream
-                                const formatStream = data.formatStreams.find((s: any) => s.resolution === '720p') ||
-                                    data.formatStreams.find((s: any) => s.resolution === '360p') ||
-                                    data.formatStreams[0];
-
-                                if (formatStream && formatStream.url) {
-                                    console.log(`Found stream URL from Invidious: ${formatStream.resolution}`);
-                                    // Download the file
-                                    await downloadFile(formatStream.url, outputPath);
-                                    return;
-                                }
-                            }
-                        }
-                    } catch (error) {
-                        console.log(`Error with Invidious instance ${instance}:`, error);
-                        // Continue to next instance
-                    }
-                }
-
-                // Approach 2: Try using a web-based API service (as fallback)
-                try {
-                    const apiUrl = `https://api.vevioz.com/api/button/videos/${videoId}`;
-                    const response = await fetch(apiUrl);
-
-                    if (response.ok) {
-                        const html = await response.text();
-                        const downloadLinkMatch = html.match(/href="(https?:\/\/[^"]+download[^"]+)"/);
-
-                        if (downloadLinkMatch && downloadLinkMatch[1]) {
-                            console.log('Found download link from Vevioz API');
-                            await downloadFile(downloadLinkMatch[1], outputPath);
-                            return;
-                        }
-                    }
-                } catch (error) {
-                    console.log('Error with Vevioz API:', error);
-                }
-
-                // Approach 3: Final fallback - use YouTube page to get direct links
-                console.log('Using YouTube page approach to find stream URLs');
-                const ytpageUrl = `https://www.youtube.com/watch?v=${videoId}`;
-                const ytResponse = await fetch(ytpageUrl);
-
-                if (ytResponse.ok) {
-                    const html = await ytResponse.text();
-
-                    // Look for URL encoded streams
-                    const urlEncodedMatch = html.match(/(?:"url_encoded_fmt_stream_map":)(".*?")/);
-                    if (urlEncodedMatch && urlEncodedMatch[1]) {
-                        try {
-                            const formats = JSON.parse(urlEncodedMatch[1]);
-                            const urls = formats.match(/https?:\/\/[^"]+/g);
-
-                            if (urls && urls.length > 0) {
-                                console.log('Found URL from YouTube page');
-                                await downloadFile(urls[0], outputPath);
-                                return;
-                            }
-                        } catch (parseError) {
-                            console.log('Error parsing URL encoded formats:', parseError);
-                        }
-                    }
-
-                    // Look for videoplayback URLs
-                    const videoPlaybackUrls = html.match(/https:\/\/[^"]*videoplayback[^"]*/g);
-                    if (videoPlaybackUrls && videoPlaybackUrls.length > 0) {
-                        console.log('Found videoplayback URL from YouTube page');
-                        await downloadFile(videoPlaybackUrls[0], outputPath);
-                        return;
-                    }
-                }
-
-                throw new Error('Could not find any valid stream URL');
-            } catch (error) {
-                console.error('All download methods failed:', error);
-                throw error;
-            }
-        }
-    };
-
-    // Helper function to extract video ID
-    function extractVideoId(url: string): string | null {
-        const patterns = [
-            /(?:youtube\.com\/watch\?v=|youtu\.be\/)([^&?\s]+)/,
-            /youtube\.com\/embed\/([^&?\s]+)/,
-            /youtube\.com\/v\/([^&?\s]+)/
-        ];
-
-        for (const pattern of patterns) {
-            const match = url.match(pattern);
-            if (match) return match[1];
-        }
-
-        return null;
-    }
-
-    // Helper function to download file using fetch API
-    async function downloadFile(url: string, outputPath: string): Promise<void> {
-        console.log(`Downloading file from ${url} to ${outputPath}`);
-
-        try {
-            // Use curl for better compatibility with serverless environments
-            await execAsync(`curl -L "${url}" -o "${outputPath}"`);
-            console.log('Download completed using curl');
-        } catch (curlError) {
-            console.error('Curl download failed:', curlError);
-
-            // Fallback to fetch + node file API if curl fails
-            try {
-                console.log('Trying fetch API download fallback');
-                const response = await fetch(url);
-
-                if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status}`);
-                }
-
-                const buffer = await response.arrayBuffer();
-                fs.writeFileSync(outputPath, Buffer.from(buffer));
-                console.log('Download completed using fetch API');
-            } catch (fetchError) {
-                console.error('Fetch download failed:', fetchError);
-                throw fetchError;
-            }
-        }
-    }
-
-    return nodeDownloader;
+interface VideoMetadata {
+    title?: string;
+    thumbnail?: string;
+    thumbnails?: Array<{
+        url: string;
+        width?: number;
+        height?: number;
+    }>;
+    duration?: number;
+    uploader?: string;
+    channel?: string;
 }
 
 /**
- * Ensures the YouTube download capability is available
+ * Optimized initialization for serverless environments
+ * Uses the default instance with optimized settings for limited resources
  */
 export async function ensureYtDlp(): Promise<boolean> {
-    // If already initialized, don't repeat
     if ((global as NodeJS.Global).ytdlpInitialized) {
         return true;
     }
 
-    // First, try to use system yt-dlp
     try {
-        await execAsync('yt-dlp --version');
-        console.log('yt-dlp is already installed in the system.');
-        (global as NodeJS.Global).ytdlpInitialized = true;
-        return true;
-    } catch (systemError) {
-        console.log('System yt-dlp not found. Creating in-memory downloader...');
+        console.log('Initializing youtube-dl-exec for serverless environment...');
 
-        // Create in-memory downloader
-        (global as NodeJS.Global).nodeDownloader = createInMemoryDownloader();
-        (global as NodeJS.Global).ytdlpInitialized = true;
-        (global as NodeJS.Global).ytDlpPath = 'in-memory';
+        // For serverless environments, we rely on the pre-installed binary
+        // that comes with youtube-dl-exec package during build time
 
+        // Test with a minimal command to verify the binary works
+        const testResult = await youtubeDl('https://www.youtube.com/watch?v=dQw4w9WgXcQ', {
+            dumpSingleJson: true,
+            noCheckCertificates: true,
+            noWarnings: true,
+            skipDownload: true,
+            quiet: true,
+            // Serverless optimizations
+            noCallHome: true,
+            noMtime: true,
+            noCookies: true,
+            extractFlat: false
+        } as any);
+
+        console.log('youtube-dl-exec initialized successfully');
+        (global as NodeJS.Global).ytdlpInitialized = true;
+        (global as NodeJS.Global).ytdlpInstance = youtubeDl;
         return true;
+
+    } catch (error: any) {
+        console.error('Failed to initialize youtube-dl-exec:', error);
+
+        // In serverless environments, if the binary is not available during runtime,
+        // there's nothing we can do as we can't install it dynamically
+        // The binary should be included during the build process
+
+        // Check if this is a serverless environment
+        if (process.env.VERCEL || process.env.NETLIFY || process.env.AWS_LAMBDA_FUNCTION_NAME) {
+            console.error('youtube-dl-exec binary not available in serverless environment. Ensure it\'s included in build.');
+            console.error('Set YOUTUBE_DL_SKIP_DOWNLOAD=false during build to include the binary.');
+        }
+
+        return false;
     }
 }
 
 /**
- * Retrieves video metadata
+ * Optimized video info retrieval for serverless
+ * Uses minimal options to reduce execution time and memory usage
  */
 export async function getVideoInfo(url: string, infoPath: string): Promise<any> {
-    console.log('Fetching video metadata...');
+    console.log('Fetching video metadata (serverless optimized)...');
 
-    // Ensure we have a downloader
-    if (!(global as NodeJS.Global).ytdlpInitialized) {
-        await ensureYtDlp();
+    const isReady = await ensureYtDlp();
+    if (!isReady) {
+        throw new Error('youtube-dl-exec is not available');
     }
 
-    // Handle in-memory downloader
-    if ((global as NodeJS.Global).ytDlpPath === 'in-memory' && (global as NodeJS.Global).nodeDownloader) {
-        try {
-            console.log('Using in-memory downloader for metadata');
-            const info = await (global as NodeJS.Global).nodeDownloader.getVideoInfo(url);
-
-            // Save the info to the specified path
-            fs.writeFileSync(infoPath, JSON.stringify(info));
-
-            return info;
-        } catch (error) {
-            console.error('In-memory downloader failed:', error);
-
-            // Fallback to minimal info
-            const videoId = url.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([^&?]+)/)?.[1] || 'unknown';
-            const fallbackInfo = {
-                title: `YouTube Video ${videoId}`,
-                thumbnail: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
-                duration: 0,
-                uploader: 'Unknown'
-            };
-
-            fs.writeFileSync(infoPath, JSON.stringify(fallbackInfo));
-            return fallbackInfo;
-        }
-    }
-
-    // System yt-dlp approach (if we got here, we know it's available)
     try {
-        await execAsync(`yt-dlp "${url}" --dump-json --no-check-certificate --no-warnings > "${infoPath}"`);
-        return JSON.parse(fs.readFileSync(infoPath, 'utf8'));
+        // Use the global instance if available for better performance
+        const ytdlInstance = (global as NodeJS.Global).ytdlpInstance || youtubeDl;
+
+        const info = await ytdlInstance(url, {
+            dumpSingleJson: true,
+            noCheckCertificates: true,
+            noWarnings: true,
+            skipDownload: true,
+            quiet: true,
+            // Serverless optimizations - but maintain quality
+            noCallHome: true,
+            noMtime: true,
+            noCookies: true,
+            extractFlat: false,
+            // Standard headers for best compatibility
+            addHeader: [
+                'referer:youtube.com',
+                'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            ],
+            // Extended timeout for metadata
+            socketTimeout: 60,
+            // Standard buffer size
+            bufferSize: '16K'
+        } as any) as VideoMetadata;
+
+        // Create optimized metadata object with full thumbnails array
+        const metadata = {
+            title: info?.title || 'Untitled Video',
+            thumbnail: info?.thumbnail || `https://i.ytimg.com/vi/${extractVideoId(url)}/maxresdefault.jpg`,
+            thumbnails: info?.thumbnails || [], // Keep all thumbnails for quality options
+            duration: info?.duration || 0,
+            uploader: info?.uploader || info?.channel || 'Unknown'
+        };
+
+        // Save metadata efficiently
+        fs.writeFileSync(infoPath, JSON.stringify(metadata, null, 2));
+
+        console.log('Video metadata retrieved:', metadata.title);
+        return metadata;
+
     } catch (error) {
-        console.log('JSON parsing failed. Using text-based extraction...', error);
+        console.error('Error fetching video metadata:', error);
+
+        // Fast fallback for serverless environments
+        const videoId = extractVideoId(url);
+        const fallbackInfo = {
+            title: `YouTube Video ${videoId}`,
+            thumbnail: `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`,
+            thumbnails: [],
+            duration: 0,
+            uploader: 'Unknown'
+        };
+
+        fs.writeFileSync(infoPath, JSON.stringify(fallbackInfo, null, 2));
+        return fallbackInfo;
+    }
+}
+
+/**
+ * Maximum quality video download optimized for serverless environments
+ * NEVER compromises on video quality - always downloads the best available
+ */
+export async function downloadVideo(url: string, outputPath: string): Promise<void> {
+    console.log('Starting MAXIMUM QUALITY video download...');
+    console.log('Output path:', outputPath);
+
+    const isReady = await ensureYtDlp();
+    if (!isReady) {
+        throw new Error('youtube-dl-exec is not available');
+    }
+
+    const baseOutputPath = outputPath.replace(/\.mp4$/, '');
+    const ytdlInstance = (global as NodeJS.Global).ytdlpInstance || youtubeDl;
+
+    try {
+        // MAXIMUM QUALITY PRIORITY - never compromise on quality
+        await ytdlInstance(url, {
+            output: `${baseOutputPath}.%(ext)s`,
+            // BEST QUALITY FORMAT SELECTION - prioritizes highest resolution and quality
+            format: 'bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1440][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+            mergeOutputFormat: 'mp4',
+            noCheckCertificates: true,
+            noWarnings: true,
+
+            // Essential headers for maximum compatibility and quality access
+            addHeader: [
+                'referer:youtube.com',
+                'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            ],
+
+            // Quality-focused settings
+            preferFreeFormats: true,
+            noCallHome: true,
+
+            // Optimize for serverless but maintain quality
+            bufferSize: '16K',           // Standard buffer for quality
+            httpChunkSize: '10M',        // Larger chunks for better quality streaming
+            retries: 5,                  // More retries to ensure we get the video
+            fragmentRetries: 5,
+
+            // Extended timeouts for high quality downloads
+            socketTimeout: 120,          // 2 minutes timeout for large files
+
+            // Quality preservation settings
+            embedSubs: false,            // Keep focused on video quality
+            writeSubtitles: false,
+            writeDescriptions: false,
+            writeInfoJson: false,
+            writeAnnotations: false,
+            writeThumbnail: false,
+
+            // Ensure no quality reduction during processing
+            noPostOverwrites: true,
+            keepVideo: false,            // Don't keep separate video files after merging
+
+            // Audio quality settings for maximum quality
+            audioQuality: '0',           // Best audio quality
+            audioFormat: 'best'
+        } as any);
+
+        console.log('MAXIMUM QUALITY video downloaded successfully!');
+
+    } catch (primaryError) {
+        console.warn('Primary max quality download failed, trying alternative high quality format:', primaryError);
 
         try {
-            await execAsync(`yt-dlp "${url}" --print title --print thumbnail --print duration --print uploader --no-check-certificate --no-warnings > "${infoPath}.txt"`);
-            const rawFields = fs.readFileSync(`${infoPath}.txt`, 'utf8').split('\n').filter(Boolean);
+            // Alternative high quality approach - still maintaining maximum quality
+            await ytdlInstance(url, {
+                output: `${baseOutputPath}.%(ext)s`,
+                // Alternative max quality format - still prioritizing highest available quality
+                format: 'best[height<=2160]/best[height<=1440]/best[height<=1080]/best[ext=mp4]/best',
+                noCheckCertificates: true,
+                noWarnings: true,
+                addHeader: [
+                    'referer:youtube.com',
+                    'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                ],
+                retries: 3,
+                socketTimeout: 90,
+                audioQuality: '0',
+                preferFreeFormats: true,
+                noCallHome: true
+            } as any);
 
-            const metadata = {
-                title: rawFields[0] || 'Untitled Video',
-                thumbnail: rawFields[1] || '',
-                duration: parseFloat(rawFields[2]) || 0,
-                uploader: rawFields[3] || 'Unknown'
-            };
+            console.log('Alternative MAXIMUM QUALITY download successful!');
 
-            fs.writeFileSync(infoPath, JSON.stringify(metadata));
-            return metadata;
-        } catch (textError) {
-            console.error('Text extraction failed:', textError);
+        } catch (fallbackError) {
+            console.error('High quality download methods failed, trying basic best format:', fallbackError);
 
-            // Ultimate fallback - extract video ID and return minimal info
-            const videoId = url.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([^&?]+)/)?.[1] || 'unknown';
-            const fallbackInfo = {
-                title: `YouTube Video ${videoId}`,
-                thumbnail: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
-                duration: 0,
-                uploader: 'Unknown'
-            };
+            try {
+                // Final attempt - still trying for best quality available
+                await ytdlInstance(url, {
+                    output: `${baseOutputPath}.%(ext)s`,
+                    format: 'best',              // Still getting the best available
+                    noCheckCertificates: true,
+                    retries: 2,
+                    socketTimeout: 60,
+                    addHeader: ['referer:youtube.com']
+                } as any);
 
-            fs.writeFileSync(infoPath, JSON.stringify(fallbackInfo));
-            return fallbackInfo;
+                console.log('Basic BEST QUALITY download successful!');
+
+            } catch (basicError) {
+                console.error('All quality-focused download methods failed:', basicError);
+
+                const errorMessage = basicError instanceof Error ? basicError.message : String(basicError);
+
+                if (process.env.VERCEL || process.env.NETLIFY || process.env.AWS_LAMBDA_FUNCTION_NAME) {
+                    throw new Error(`Serverless max quality download failed: ${errorMessage}. Consider increasing memory/timeout limits for high quality downloads.`);
+                } else {
+                    throw new Error(`Failed to download maximum quality video: ${errorMessage}`);
+                }
+            }
         }
     }
 }
 
 /**
- * Downloads video file
+ * Helper function to extract video ID from URL
  */
-export async function downloadVideo(url: string, outputPath: string): Promise<void> {
-    console.log('Starting video download...');
-    console.log('Output path:', outputPath);
+function extractVideoId(url: string): string {
+    const patterns = [
+        /(?:youtube\.com\/watch\?v=|youtu\.be\/)([^&?\s]+)/,
+        /youtube\.com\/embed\/([^&?\s]+)/,
+        /youtube\.com\/v\/([^&?\s]+)/
+    ];
 
-    // Ensure we have a downloader
-    if (!(global as NodeJS.Global).ytdlpInitialized) {
-        await ensureYtDlp();
+    for (const pattern of patterns) {
+        const match = url.match(pattern);
+        if (match) return match[1];
     }
 
-    // Handle in-memory downloader
-    if ((global as NodeJS.Global).ytDlpPath === 'in-memory' && (global as NodeJS.Global).nodeDownloader) {
-        try {
-            console.log('Using in-memory downloader for video');
-            await (global as NodeJS.Global).nodeDownloader.downloadVideo(url, outputPath);
-            return;
-        } catch (error) {
-            console.error('In-memory downloader failed:', error);
-            throw error;
-        }
-    }
+    return 'unknown';
+}
 
-    // Standard yt-dlp approach (we'll only get here if system yt-dlp is available)
-    // Get base filename without extension for consistent naming
-    const baseOutputPath = outputPath.replace(/\.mp4$/, '');
+/**
+ * Utility function to check if running in serverless environment
+ */
+export function isServerlessEnvironment(): boolean {
+    return !!(
+        process.env.VERCEL ||
+        process.env.NETLIFY ||
+        process.env.AWS_LAMBDA_FUNCTION_NAME ||
+        process.env.AZURE_FUNCTIONS_ENVIRONMENT ||
+        process.env.GOOGLE_CLOUD_PROJECT
+    );
+}
 
-    try {
-        // Format selection prioritizing audio and video quality
-        const command = `yt-dlp "${url}" -f "bestvideo+bestaudio/best" --merge-output-format mp4 -o "${baseOutputPath}.%(ext)s" --no-check-certificate --no-warnings`;
-        console.log('Executing command:', command);
+/**
+ * Get optimal configuration for maximum quality downloads
+ * Never compromises on video quality regardless of environment
+ */
+export function getOptimalConfig() {
+    const isServerless = isServerlessEnvironment();
 
-        await execAsync(command);
-    } catch (dlError) {
-        console.error('Primary download failed:', dlError);
+    return {
+        // MAXIMUM QUALITY - supports up to 4K downloads
+        format: 'bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1440][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
 
-        // Try simpler approach
-        try {
-            await execAsync(`yt-dlp "${url}" -f "best" -o "${baseOutputPath}.%(ext)s" --no-check-certificate --no-warnings`);
-        } catch (simpleError) {
-            console.error('Simple download failed:', simpleError);
+        // Quality-focused buffer and chunk sizes
+        bufferSize: '16K',
+        httpChunkSize: '10M',
 
-            // Fallback to in-memory downloader as last resort
-            if (!(global as NodeJS.Global).nodeDownloader) {
-                (global as NodeJS.Global).nodeDownloader = createInMemoryDownloader();
-            }
+        // More retries for quality assurance
+        retries: isServerless ? 3 : 5,
 
-            console.log('Using in-memory downloader as fallback');
-            await (global as NodeJS.Global).nodeDownloader.downloadVideo(url, outputPath);
-        }
-    }
+        // Extended timeouts for high quality downloads
+        socketTimeout: isServerless ? 90 : 120,
+
+        // Audio quality
+        audioQuality: '0',  // Best audio quality
+        audioFormat: 'best',
+
+        // Quality preservation
+        mergeOutputFormat: 'mp4',
+        preferFreeFormats: true,
+        noPostOverwrites: true
+    };
 }
