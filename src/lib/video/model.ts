@@ -51,16 +51,31 @@ export interface VideoInfo {
    * File size in human-readable format (e.g., "12.34 MB")
    */
   fileSize: string;
+
+  /**
+   * Number of views (optional)
+   */
+  viewCount?: number;
+
+  /**
+   * Publication date of the video (optional)
+   */
+  publishDate?: string;
+
+  /**
+   * Channel name (optional, may differ from uploader)
+   */
+  channel?: string;
 }
 
 /**
- * Raw video metadata from yt-dlp source
+ * Raw video metadata from youtubei.js source
  */
 export interface VideoMetadata {
   /**
-   * Original video title
+   * Original video title (optional during fetch, required after processing)
    */
-  title: string;
+  title?: string;
   
   /**
    * Primary thumbnail URL (optional)
@@ -73,12 +88,27 @@ export interface VideoMetadata {
   thumbnails?: Thumbnail[];
   
   /**
-   * Video duration in seconds
+   * Video duration in seconds (optional during fetch)
    */
-  duration: number;
+  duration?: number;
   
   /**
-   * Content creator/author name
+   * Content creator/author name (optional during fetch)
    */
-  uploader: string;
+  uploader?: string;
+
+  /**
+   * Channel name (optional, may differ from uploader)
+   */
+  channel?: string;
+
+  /**
+   * Number of views (optional)
+   */
+  viewCount?: number;
+
+  /**
+   * Publication date of the video (optional)
+   */
+  publishDate?: string;
 }

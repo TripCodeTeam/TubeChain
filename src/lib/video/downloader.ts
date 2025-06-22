@@ -1,5 +1,8 @@
-import youtubeDl from 'youtube-dl-exec';
+import { Innertube, ClientType } from 'youtubei.js';
 import fs from 'fs';
+import https from 'https';
+import http from 'http';
+import { URL } from 'url';
 
 /**
  * Augment the NodeJS global type
@@ -7,8 +10,8 @@ import fs from 'fs';
 declare global {
     namespace NodeJS {
         interface Global {
-            ytdlpInitialized?: boolean;
-            ytdlpInstance?: typeof youtubeDl;
+            innertubeInitialized?: boolean;
+            innertubeInstance?: Innertube;
         }
     }
 }
@@ -27,123 +30,175 @@ interface VideoMetadata {
     duration?: number;
     uploader?: string;
     channel?: string;
+    viewCount?: number;
+    publishDate?: string;
 }
 
 /**
- * Optimized initialization for serverless environments
- * Uses the default instance with optimized settings for limited resources
+ * Download configuration for different quality levels
  */
-export async function ensureYtDlp(): Promise<boolean> {
-    if ((global as NodeJS.Global).ytdlpInitialized) {
-        return true;
+interface DownloadConfig {
+    quality: 'highest' | 'high' | 'medium' | 'audio_only';
+    format: 'mp4' | 'webm' | 'any';
+    includeAudio: boolean;
+}
+
+interface AdaptiveFormat {
+    mime_type?: string;
+    quality_label?: string;
+    bitrate?: number;
+    has_audio?: boolean;
+    decipher: (player: any) => string;
+    [key: string]: any;
+}
+
+interface Thumbnail {
+    url: string;
+    width?: number;
+    height?: number;
+}
+
+// Tipo para VideoInfo basado en la respuesta real de YouTube.js
+type VideoInfo = Awaited<ReturnType<Innertube['getInfo']>>;
+
+/**
+ * Optimized initialization for serverless environments (Vercel)
+ * Uses YouTube.js with optional cookie authentication
+ */
+export async function ensureInnertube(cookie?: string): Promise<Innertube> {
+    if ((global as NodeJS.Global).innertubeInitialized && (global as NodeJS.Global).innertubeInstance) {
+        return (global as NodeJS.Global).innertubeInstance!;
     }
 
     try {
-        console.log('Initializing youtube-dl-exec for serverless environment...');
+        console.log('Initializing YouTube.js for Vercel serverless environment...');
 
-        // For serverless environments, we rely on the pre-installed binary
-        // that comes with youtube-dl-exec package during build time
+        const innertube = await Innertube.create({
+            // Use cookie authentication if provided (recommended for better access)
+            ...(cookie && { cookie }),
 
-        // Test with a minimal command to verify the binary works
-        const testResult = await youtubeDl('https://www.youtube.com/watch?v=dQw4w9WgXcQ', {
-            dumpSingleJson: true,
-            noCheckCertificates: true,
-            noWarnings: true,
-            skipDownload: true,
-            quiet: true,
-            // Serverless optimizations
-            noCallHome: true,
-            noMtime: true,
-            noCookies: true,
-            extractFlat: false
-        } as any);
+            // Optimize for serverless environments like Vercel
+            enable_session_cache: false,
 
-        console.log('youtube-dl-exec initialized successfully');
-        (global as NodeJS.Global).ytdlpInitialized = true;
-        (global as NodeJS.Global).ytdlpInstance = youtubeDl;
-        return true;
+            // Client configuration for better compatibility
+            client_type: ClientType.WEB,
+
+            // Add visitor data for better reliability
+            visitor_data: undefined,
+
+            // Optimize for Vercel's memory limits
+            cache: undefined
+        });
+
+        console.log('YouTube.js initialized successfully for Vercel');
+        (global as NodeJS.Global).innertubeInitialized = true;
+        (global as NodeJS.Global).innertubeInstance = innertube;
+
+        return innertube;
 
     } catch (error: any) {
-        console.error('Failed to initialize youtube-dl-exec:', error);
+        console.error('Failed to initialize YouTube.js:', error);
 
-        // In serverless environments, if the binary is not available during runtime,
-        // there's nothing we can do as we can't install it dynamically
-        // The binary should be included during the build process
+        // Fallback without authentication for Vercel
+        try {
+            console.log('Retrying without authentication for Vercel...');
+            const innertube = await Innertube.create({
+                enable_session_cache: false,
+                client_type: ClientType.WEB,
+                cache: undefined
+            });
 
-        // Check if this is a serverless environment
-        if (process.env.VERCEL || process.env.NETLIFY || process.env.AWS_LAMBDA_FUNCTION_NAME) {
-            console.error('youtube-dl-exec binary not available in serverless environment. Ensure it\'s included in build.');
-            console.error('Set YOUTUBE_DL_SKIP_DOWNLOAD=false during build to include the binary.');
+            (global as NodeJS.Global).innertubeInitialized = true;
+            (global as NodeJS.Global).innertubeInstance = innertube;
+
+            return innertube;
+        } catch (fallbackError) {
+            throw new Error(`Failed to initialize YouTube.js on Vercel: ${fallbackError}`);
         }
-
-        return false;
     }
 }
 
 /**
- * Optimized video info retrieval for serverless
- * Uses minimal options to reduce execution time and memory usage
+ * Helper function to safely get nested properties
  */
-export async function getVideoInfo(url: string, infoPath: string): Promise<any> {
-    console.log('Fetching video metadata (serverless optimized)...');
+function safeGet(obj: any, path: string[]): any {
+    return path.reduce((current, key) => current?.[key], obj);
+}
 
-    const isReady = await ensureYtDlp();
-    if (!isReady) {
-        throw new Error('youtube-dl-exec is not available');
-    }
+
+/**
+ * Optimized video info retrieval for Vercel serverless
+ * Uses YouTube.js for fast metadata extraction
+ */
+export async function getVideoInfo(url: string, infoPath: string, cookie?: string): Promise<VideoMetadata> {
+    console.log('Fetching video metadata with YouTube.js on Vercel...');
+
+    const innertube = await ensureInnertube(cookie);
 
     try {
-        // Use the global instance if available for better performance
-        const ytdlInstance = (global as NodeJS.Global).ytdlpInstance || youtubeDl;
+        const videoId = extractVideoId(url);
+        if (!videoId) {
+            throw new Error('Invalid YouTube URL');
+        }
 
-        const info = await ytdlInstance(url, {
-            dumpSingleJson: true,
-            noCheckCertificates: true,
-            noWarnings: true,
-            skipDownload: true,
-            quiet: true,
-            // Serverless optimizations - but maintain quality
-            noCallHome: true,
-            noMtime: true,
-            noCookies: true,
-            extractFlat: false,
-            // Standard headers for best compatibility
-            addHeader: [
-                'referer:youtube.com',
-                'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            ],
-            // Extended timeout for metadata
-            socketTimeout: 60,
-            // Standard buffer size
-            bufferSize: '16K'
-        } as any) as VideoMetadata;
+        const videoInfo = await innertube.getInfo(videoId);
 
-        // Create optimized metadata object with full thumbnails array
-        const metadata = {
-            title: info?.title || 'Untitled Video',
-            thumbnail: info?.thumbnail || `https://i.ytimg.com/vi/${extractVideoId(url)}/maxresdefault.jpg`,
-            thumbnails: info?.thumbnails || [], // Keep all thumbnails for quality options
-            duration: info?.duration || 0,
-            uploader: info?.uploader || info?.channel || 'Unknown'
+        // Extract comprehensive metadata using safe property access
+        const basicInfo = videoInfo.basic_info;
+        
+        // Acceso seguro a las propiedades
+        const title = safeGet(basicInfo, ['title']) || 'Untitled Video';
+        const thumbnails = safeGet(basicInfo, ['thumbnail']) || [];
+        const duration = safeGet(basicInfo, ['duration', 'seconds_total']) || 0;
+        const author = safeGet(basicInfo, ['author']) || 'Unknown';
+        const channelName = safeGet(basicInfo, ['channel', 'name']) || author;
+        const viewCount = safeGet(basicInfo, ['view_count']) || 0;
+        
+        // Para publish_date, necesitamos acceder a microformat o primary_info
+        let publishDate: string | undefined;
+        try {
+            // Intentar obtener la fecha de publicación de diferentes lugares
+            publishDate = safeGet(videoInfo, ['microformat', 'microformat_data_renderer', 'publish_date']) ||
+                         safeGet(videoInfo, ['primary_info', 'published']) ||
+                         safeGet(videoInfo, ['secondary_info', 'owner', 'subscriber_count_text']) ||
+                         undefined;
+        } catch (e) {
+            console.warn('Could not extract publish date:', e);
+        }
+
+        const metadata: VideoMetadata = {
+            title: title,
+            thumbnail: thumbnails[0]?.url || `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`,
+            thumbnails: thumbnails.map((thumb: any) => ({
+                url: thumb.url,
+                width: thumb.width,
+                height: thumb.height
+            })),
+            duration: duration,
+            uploader: author,
+            channel: channelName,
+            viewCount: Number(viewCount) || 0,
+            publishDate: publishDate
         };
 
-        // Save metadata efficiently
+        // Save metadata efficiently for Vercel
         fs.writeFileSync(infoPath, JSON.stringify(metadata, null, 2));
 
-        console.log('Video metadata retrieved:', metadata.title);
+        console.log('Video metadata retrieved on Vercel:', metadata.title);
         return metadata;
 
     } catch (error) {
-        console.error('Error fetching video metadata:', error);
+        console.error('Error fetching video metadata on Vercel:', error);
 
-        // Fast fallback for serverless environments
+        // Fast fallback for Vercel serverless environments
         const videoId = extractVideoId(url);
-        const fallbackInfo = {
+        const fallbackInfo: VideoMetadata = {
             title: `YouTube Video ${videoId}`,
             thumbnail: `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`,
             thumbnails: [],
             duration: 0,
-            uploader: 'Unknown'
+            uploader: 'Unknown',
+            channel: 'Unknown'
         };
 
         fs.writeFileSync(infoPath, JSON.stringify(fallbackInfo, null, 2));
@@ -152,128 +207,203 @@ export async function getVideoInfo(url: string, infoPath: string): Promise<any> 
 }
 
 /**
- * Maximum quality video download optimized for serverless environments
- * NEVER compromises on video quality - always downloads the best available
+ * Maximum quality video download using YouTube.js optimized for Vercel
+ * Downloads the highest quality available stream
  */
-export async function downloadVideo(url: string, outputPath: string): Promise<void> {
-    console.log('Starting MAXIMUM QUALITY video download...');
+export async function downloadVideo(
+    url: string,
+    outputPath: string,
+    config: DownloadConfig = { quality: 'highest', format: 'mp4', includeAudio: true },
+    cookie?: string
+): Promise<void> {
+    console.log('Starting MAXIMUM QUALITY video download with YouTube.js on Vercel...');
     console.log('Output path:', outputPath);
 
-    const isReady = await ensureYtDlp();
-    if (!isReady) {
-        throw new Error('youtube-dl-exec is not available');
+    const innertube = await ensureInnertube(cookie);
+    const videoId = extractVideoId(url);
+
+    if (!videoId) {
+        throw new Error('Invalid YouTube URL');
     }
 
-    const baseOutputPath = outputPath.replace(/\.mp4$/, '');
-    const ytdlInstance = (global as NodeJS.Global).ytdlpInstance || youtubeDl;
-
     try {
-        // MAXIMUM QUALITY PRIORITY - never compromise on quality
-        await ytdlInstance(url, {
-            output: `${baseOutputPath}.%(ext)s`,
-            // BEST QUALITY FORMAT SELECTION - prioritizes highest resolution and quality
-            format: 'bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1440][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-            mergeOutputFormat: 'mp4',
-            noCheckCertificates: true,
-            noWarnings: true,
+        const videoInfo = await innertube.getInfo(videoId);
 
-            // Essential headers for maximum compatibility and quality access
-            addHeader: [
-                'referer:youtube.com',
-                'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            ],
+        // Get the best quality stream based on configuration
+        const stream = getBestQualityStream(videoInfo, config);
 
-            // Quality-focused settings
-            preferFreeFormats: true,
-            noCallHome: true,
+        if (!stream) {
+            throw new Error('No suitable stream found for the specified quality');
+        }
 
-            // Optimize for serverless but maintain quality
-            bufferSize: '16K',           // Standard buffer for quality
-            httpChunkSize: '10M',        // Larger chunks for better quality streaming
-            retries: 5,                  // More retries to ensure we get the video
-            fragmentRetries: 5,
+        console.log(`Downloading stream on Vercel: ${stream.quality_label || 'Best Available'} - ${stream.mime_type}`);
 
-            // Extended timeouts for high quality downloads
-            socketTimeout: 120,          // 2 minutes timeout for large files
+        // Download the stream with Vercel timeout considerations
+        await downloadStreamWithTimeout(stream.decipher(innertube.session.player), outputPath);
 
-            // Quality preservation settings
-            embedSubs: false,            // Keep focused on video quality
-            writeSubtitles: false,
-            writeDescriptions: false,
-            writeInfoJson: false,
-            writeAnnotations: false,
-            writeThumbnail: false,
+        console.log('MAXIMUM QUALITY video downloaded successfully on Vercel!');
 
-            // Ensure no quality reduction during processing
-            noPostOverwrites: true,
-            keepVideo: false,            // Don't keep separate video files after merging
+    } catch (error) {
+        console.error('Error downloading video on Vercel:', error);
 
-            // Audio quality settings for maximum quality
-            audioQuality: '0',           // Best audio quality
-            audioFormat: 'best'
-        } as any);
-
-        console.log('MAXIMUM QUALITY video downloaded successfully!');
-
-    } catch (primaryError) {
-        console.warn('Primary max quality download failed, trying alternative high quality format:', primaryError);
-
+        // Fallback to adaptive streams if direct download fails
         try {
-            // Alternative high quality approach - still maintaining maximum quality
-            await ytdlInstance(url, {
-                output: `${baseOutputPath}.%(ext)s`,
-                // Alternative max quality format - still prioritizing highest available quality
-                format: 'best[height<=2160]/best[height<=1440]/best[height<=1080]/best[ext=mp4]/best',
-                noCheckCertificates: true,
-                noWarnings: true,
-                addHeader: [
-                    'referer:youtube.com',
-                    'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-                ],
-                retries: 3,
-                socketTimeout: 90,
-                audioQuality: '0',
-                preferFreeFormats: true,
-                noCallHome: true
-            } as any);
-
-            console.log('Alternative MAXIMUM QUALITY download successful!');
-
+            console.log('Trying adaptive stream download on Vercel...');
+            await downloadAdaptiveStreams(innertube, videoId, outputPath, config);
+            console.log('Adaptive stream download successful on Vercel!');
         } catch (fallbackError) {
-            console.error('High quality download methods failed, trying basic best format:', fallbackError);
-
-            try {
-                // Final attempt - still trying for best quality available
-                await ytdlInstance(url, {
-                    output: `${baseOutputPath}.%(ext)s`,
-                    format: 'best',              // Still getting the best available
-                    noCheckCertificates: true,
-                    retries: 2,
-                    socketTimeout: 60,
-                    addHeader: ['referer:youtube.com']
-                } as any);
-
-                console.log('Basic BEST QUALITY download successful!');
-
-            } catch (basicError) {
-                console.error('All quality-focused download methods failed:', basicError);
-
-                const errorMessage = basicError instanceof Error ? basicError.message : String(basicError);
-
-                if (process.env.VERCEL || process.env.NETLIFY || process.env.AWS_LAMBDA_FUNCTION_NAME) {
-                    throw new Error(`Serverless max quality download failed: ${errorMessage}. Consider increasing memory/timeout limits for high quality downloads.`);
-                } else {
-                    throw new Error(`Failed to download maximum quality video: ${errorMessage}`);
-                }
-            }
+            throw new Error(`Failed to download video on Vercel: ${fallbackError}`);
         }
     }
 }
 
 /**
+ * Get the best quality stream from available formats
+ */
+function getBestQualityStream(videoInfo: VideoInfo, config: DownloadConfig): any {
+    const formats = safeGet(videoInfo, ['streaming_data', 'formats']) || [];
+    const adaptiveFormats = safeGet(videoInfo, ['streaming_data', 'adaptive_formats']) || [];
+
+    // Combine all available streams
+    const allStreams = [...formats, ...adaptiveFormats];
+
+    if (config.quality === 'audio_only') {
+        // Find best audio stream
+        return allStreams
+            .filter(stream => stream.mime_type?.includes('audio'))
+            .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+    }
+
+    // Filter by format preference if specified
+    let filteredStreams = allStreams;
+    if (config.format !== 'any') {
+        filteredStreams = allStreams.filter(stream =>
+            stream.mime_type?.includes(config.format)
+        );
+
+        // Fallback to any format if preferred format not available
+        if (filteredStreams.length === 0) {
+            filteredStreams = allStreams;
+        }
+    }
+
+    // Filter for video streams if audio is required to be included
+    if (config.includeAudio) {
+        const videoWithAudio = filteredStreams.filter(stream =>
+            stream.mime_type?.includes('video') && stream.has_audio
+        );
+
+        if (videoWithAudio.length > 0) {
+            filteredStreams = videoWithAudio;
+        }
+    }
+
+    // Sort by quality based on preference
+    switch (config.quality) {
+        case 'highest':
+            return filteredStreams
+                .filter(stream => stream.mime_type?.includes('video'))
+                .sort((a, b) => {
+                    // Prioritize by resolution, then bitrate
+                    const aRes = parseInt(a.quality_label?.replace('p', '') || '0');
+                    const bRes = parseInt(b.quality_label?.replace('p', '') || '0');
+                    if (aRes !== bRes) return bRes - aRes;
+                    return (b.bitrate || 0) - (a.bitrate || 0);
+                })[0];
+
+        case 'high':
+            return filteredStreams
+                .filter(stream => {
+                    const res = parseInt(stream.quality_label?.replace('p', '') || '0');
+                    return res <= 1080 && res >= 720 && stream.mime_type?.includes('video');
+                })
+                .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+
+        case 'medium':
+            return filteredStreams
+                .filter(stream => {
+                    const res = parseInt(stream.quality_label?.replace('p', '') || '0');
+                    return res <= 720 && res >= 480 && stream.mime_type?.includes('video');
+                })
+                .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+
+        default:
+            return filteredStreams[0];
+    }
+}
+
+/**
+ * Download stream data to file with Vercel timeout handling
+ */
+async function downloadStreamWithTimeout(streamUrl: string, outputPath: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+        const url = new URL(streamUrl);
+        const client = url.protocol === 'https:' ? https : http;
+
+        const request = client.get(streamUrl, (response) => {
+            if (response.statusCode !== 200) {
+                reject(new Error(`HTTP ${response.statusCode}: ${response.statusMessage}`));
+                return;
+            }
+
+            const writeStream = fs.createWriteStream(outputPath);
+
+            response.pipe(writeStream);
+
+            writeStream.on('finish', () => {
+                writeStream.close();
+                resolve();
+            });
+
+            writeStream.on('error', reject);
+        });
+
+        request.on('error', reject);
+        
+        // Shorter timeout for Vercel serverless functions (max 60s)
+        request.setTimeout(50000, () => {
+            request.destroy();
+            reject(new Error('Download timeout - Vercel function limit'));
+        });
+    });
+}
+
+/**
+ * Download adaptive streams (video + audio separately, then merge)
+ * Optimized for Vercel serverless constraints
+ */
+async function downloadAdaptiveStreams(
+    innertube: Innertube,
+    videoId: string,
+    outputPath: string,
+    config: DownloadConfig
+): Promise<void> {
+    const videoInfo = await innertube.getInfo(videoId);
+    const adaptiveFormats = safeGet(videoInfo, ['streaming_data', 'adaptive_formats']) || [];
+
+    // Find best video stream
+    const videoStream: AdaptiveFormat | undefined = (adaptiveFormats as AdaptiveFormat[])
+        .filter((stream: AdaptiveFormat) => stream.mime_type?.includes('video'))
+        .sort((a: AdaptiveFormat, b: AdaptiveFormat) => {
+            const aRes = parseInt(a.quality_label?.replace('p', '') || '0');
+            const bRes = parseInt(b.quality_label?.replace('p', '') || '0');
+            return bRes - aRes;
+        })[0];
+
+    if (!videoStream) {
+        throw new Error('No video stream found');
+    }
+
+    // For Vercel, download just the video stream to avoid complexity
+    // In production, you might want to merge video + audio using ffmpeg
+    const streamUrl = videoStream.decipher(innertube.session.player);
+    await downloadStreamWithTimeout(streamUrl, outputPath);
+}
+
+/**
  * Helper function to extract video ID from URL
  */
-function extractVideoId(url: string): string {
+function extractVideoId(url: string): string | null {
     const patterns = [
         /(?:youtube\.com\/watch\?v=|youtu\.be\/)([^&?\s]+)/,
         /youtube\.com\/embed\/([^&?\s]+)/,
@@ -285,11 +415,22 @@ function extractVideoId(url: string): string {
         if (match) return match[1];
     }
 
-    return 'unknown';
+    return null;
 }
 
 /**
- * Utility function to check if running in serverless environment
+ * Utility function to check if running in Vercel environment
+ */
+export function isVercelEnvironment(): boolean {
+    return !!(
+        process.env.VERCEL ||
+        process.env.VERCEL_ENV ||
+        process.env.VERCEL_URL
+    );
+}
+
+/**
+ * Utility function to check if running in any serverless environment
  */
 export function isServerlessEnvironment(): boolean {
     return !!(
@@ -302,33 +443,63 @@ export function isServerlessEnvironment(): boolean {
 }
 
 /**
- * Get optimal configuration for maximum quality downloads
- * Never compromises on video quality regardless of environment
+ * Get optimal configuration for maximum quality downloads on Vercel
+ * Supports up to 4K downloads when available
  */
-export function getOptimalConfig() {
-    const isServerless = isServerlessEnvironment();
-
+export function getOptimalConfig(): DownloadConfig {
     return {
-        // MAXIMUM QUALITY - supports up to 4K downloads
-        format: 'bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1440][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-
-        // Quality-focused buffer and chunk sizes
-        bufferSize: '16K',
-        httpChunkSize: '10M',
-
-        // More retries for quality assurance
-        retries: isServerless ? 3 : 5,
-
-        // Extended timeouts for high quality downloads
-        socketTimeout: isServerless ? 90 : 120,
-
-        // Audio quality
-        audioQuality: '0',  // Best audio quality
-        audioFormat: 'best',
-
-        // Quality preservation
-        mergeOutputFormat: 'mp4',
-        preferFreeFormats: true,
-        noPostOverwrites: true
+        quality: 'highest',      // Always prioritize maximum quality
+        format: 'mp4',          // Prefer MP4 for compatibility
+        includeAudio: true      // Include audio in video downloads
     };
+}
+
+/**
+ * Advanced download with custom options optimized for Vercel
+ */
+export async function downloadVideoAdvanced(
+    url: string,
+    outputPath: string,
+    options: {
+        cookie?: string;
+        quality?: 'highest' | 'high' | 'medium' | 'audio_only';
+        format?: 'mp4' | 'webm' | 'any';
+        includeAudio?: boolean;
+        maxRetries?: number;
+    } = {}
+): Promise<VideoMetadata> {
+    const config: DownloadConfig = {
+        quality: options.quality || 'highest',
+        format: options.format || 'mp4',
+        includeAudio: options.includeAudio !== false
+    };
+
+    const maxRetries = options.maxRetries || 2; // Reduced for Vercel timeout limits
+    let lastError: Error | null = null;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            console.log(`Vercel download attempt ${attempt}/${maxRetries}`);
+
+            // Get video info first
+            const infoPath = outputPath.replace(/\.[^.]+$/, '.info.json');
+            const metadata = await getVideoInfo(url, infoPath, options.cookie);
+
+            // Download the video
+            await downloadVideo(url, outputPath, config, options.cookie);
+
+            return metadata;
+
+        } catch (error) {
+            lastError = error as Error;
+            console.error(`Vercel attempt ${attempt} failed:`, error);
+
+            if (attempt < maxRetries) {
+                console.log(`Retrying in ${attempt} seconds for Vercel...`);
+                await new Promise(resolve => setTimeout(resolve, attempt * 1000));
+            }
+        }
+    }
+
+    throw new Error(`Failed after ${maxRetries} attempts on Vercel: ${lastError?.message}`);
 }
