@@ -4,7 +4,7 @@ import { Download, Youtube, Search, Info, Clock7, Rss } from "lucide-react";
 import VideoPreview from "@/components/VideoPreview";
 
 interface FormatDuration {
-  (seconds: number | undefined | null): string;
+  (seconds: number | string | undefined | null): string;
 }
 
 export default function Home() {
@@ -13,28 +13,40 @@ export default function Home() {
     setUrl,
     isLoading,
     videoInfo,
+    fileInfo,
     error,
     downloadVideo,
     handleSubmit,
+    getFormattedFileSize,
   } = useYoutube();
 
   // Función para formatear la duración del video
-  const formatDuration: FormatDuration = (seconds) => {
-    if (!seconds) return '';
-
-    const hrs = Math.floor(seconds / 3600);
-    const mins = Math.floor((seconds % 3600) / 60);
-    const secs = Math.floor(seconds % 60);
-
-    const parts: string[] = [];
-    if (hrs > 0) {
-      parts.push(`${hrs}:${mins.toString().padStart(2, '0')}`);
-    } else {
-      parts.push(mins.toString());
+  const formatDuration: FormatDuration = (duration) => {
+    if (!duration) return '';
+    
+    // Si ya es una cadena formateada, la devolvemos tal como está
+    if (typeof duration === 'string') {
+      return duration;
     }
-    parts.push(secs.toString().padStart(2, '0'));
+    
+    // Si es un número, lo convertimos a formato de tiempo
+    if (typeof duration === 'number') {
+      const hrs = Math.floor(duration / 3600);
+      const mins = Math.floor((duration % 3600) / 60);
+      const secs = Math.floor(duration % 60);
 
-    return parts.join(':');
+      const parts: string[] = [];
+      if (hrs > 0) {
+        parts.push(`${hrs}:${mins.toString().padStart(2, '0')}`);
+      } else {
+        parts.push(mins.toString());
+      }
+      parts.push(secs.toString().padStart(2, '0'));
+
+      return parts.join(':');
+    }
+    
+    return '';
   };
 
   return (
@@ -89,12 +101,12 @@ export default function Home() {
           {videoInfo && (
             <div className="rounded-xl overflow-hidden transition-all duration-300">
               {/* Video Preview */}
-              {videoInfo.videoId ? (
+              {videoInfo.videoId && fileInfo ? (
                 <VideoPreview
-                  videoSource={videoInfo.filename}
-                  thumbnail={videoInfo.thumbnail}
+                  videoSource={fileInfo.fullUrl}
+                  thumbnail={videoInfo.thumbnail || ""}
                   title={videoInfo.title}
-                  uploader={videoInfo.uploader ?? ""}
+                  uploader={videoInfo.author}
                 />
               ) : (
                 <div className="aspect-video bg-slate-100 relative">
@@ -131,12 +143,12 @@ export default function Home() {
                 <h2 className="text-lg font-medium mb-2 line-clamp-2 text-slate-700">{videoInfo.title}</h2>
 
                 {/* Video metadata - Minimalista */}
-                {videoInfo.uploader || videoInfo.duration || videoInfo.fileSize ? (
+                {(videoInfo.author || videoInfo.duration || fileInfo) && (
                   <div className="flex flex-wrap gap-x-4 gap-y-2 mb-5 text-slate-500 text-sm">
-                    {videoInfo.uploader && (
+                    {videoInfo.author && (
                       <div className="flex items-center gap-1">
                         <Rss size={18} />
-                        <span>{videoInfo.uploader}</span>
+                        <span>{videoInfo.author}</span>
                       </div>
                     )}
                     {videoInfo.duration && (
@@ -145,19 +157,20 @@ export default function Home() {
                         <span>{formatDuration(videoInfo.duration)}</span>
                       </div>
                     )}
-                    {videoInfo.fileSize && (
+                    {fileInfo && (
                       <div className="flex items-center gap-1">
                         <Info size={18} />
-                        <span>{videoInfo.fileSize}</span>
+                        <span>{getFormattedFileSize()}</span>
                       </div>
                     )}
                   </div>
-                ) : null}
+                )}
 
                 <div className="flex flex-col gap-3">
                   <button
                     onClick={downloadVideo}
-                    className="flex items-center justify-center gap-2 w-full p-3 rounded-full bg-slate-700 hover:bg-slate-800 transition-all duration-200 font-medium text-white shadow-sm"
+                    disabled={!fileInfo}
+                    className="flex items-center justify-center gap-2 w-full p-3 rounded-full bg-slate-700 hover:bg-slate-800 disabled:bg-slate-400 disabled:cursor-not-allowed transition-all duration-200 font-medium text-white shadow-sm"
                   >
                     <Download size={18} />
                     Descargar

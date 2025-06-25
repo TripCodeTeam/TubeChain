@@ -17,7 +17,19 @@ const VideoPreview = ({ videoSource, thumbnail, title, uploader }: VideoPreviewP
   const [isError, setIsError] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
 
-  // Updated path logic to use /temp in the public folder
+  // Add validation for videoSource
+  if (!videoSource) {
+    console.error("VideoPreview: videoSource is required but was not provided");
+    return (
+      <div className="relative w-full aspect-video bg-black overflow-hidden rounded-lg flex items-center justify-center">
+        <p className="text-white text-center px-4">
+          Error: No video source provided
+        </p>
+      </div>
+    );
+  }
+
+  // Updated path logic to use /temp in the public folder with proper validation
   const filePath = videoSource.startsWith('/')
     ? videoSource
     : `temp/${videoSource}`; // Now this will point to public/temp/ since paths in public are served at the root

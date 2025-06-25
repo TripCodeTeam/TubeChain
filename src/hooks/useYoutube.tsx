@@ -2,15 +2,34 @@
 
 import { useState, useEffect } from "react";
 
-// Interface for video metadata used in the UI
+// Interface for video metadata used in the UI - Updated to match the component needs
 type VideoInfo = {
     title: string;          // Original video title
-    filename: string;       // Local filename after download
-    thumbnail: string;      // Best available thumbnail URL
+    duration: string | number; // Duration can be formatted string or seconds number
+    quality: string;        // Video quality (e.g., "1080p")
+    author: string;         // Content creator name (changed from 'uploader' to match API)
+    viewCount: number;      // View count
+    fileSize: number;       // File size in bytes
+    thumbnail?: string;     // Thumbnail URL if available
     videoId?: string;       // YouTube video identifier
-    uploader?: string;      // Content creator name
-    duration?: number;      // Video length in seconds
-    fileSize?: string;      // File size in human-readable format
+};
+
+type FileInfo = {
+    filename: string;       // Local filename after download
+    originalFilename: string; // Original filename from backend
+    size: number;          // File size in bytes
+    path: string;          // Relative path to file
+    fullUrl: string;       // Full URL to access file
+    contentType: string;   // MIME type
+};
+
+type DownloadResponse = {
+    success: boolean;
+    message: string;
+    videoInfo: VideoInfo;
+    file: FileInfo;
+    downloadUrl: string;
+    timestamp: string;
 };
 
 /**
@@ -24,8 +43,9 @@ function useYoutube() {
     const [isLoading, setIsLoading] = useState(false);
     const [downloadProgress, setDownloadProgress] = useState<number | null>(null);
     const [videoInfo, setVideoInfo] = useState<VideoInfo | null>(null);
+    const [fileInfo, setFileInfo] = useState<FileInfo | null>(null);
     const [error, setError] = useState('');
-    const [downloadStatus, setDownloadStatus] = useState<'idle' | 'downloading' | 'complete' | 'error'>('idle');
+    const [downloadStatus, setDownloadStatus] = useState<'idle' | 'processing' | 'ready' | 'downloading' | 'complete' | 'error'>('idle');
 
     // Clear error when URL changes
     useEffect(() => {
@@ -79,6 +99,17 @@ function useYoutube() {
     };
 
     /**
+     * Formats file size from bytes to human readable format
+     */
+    const formatFileSize = (bytes: number): string => {
+        if (bytes === 0) return '0 Bytes';
+        const k = 1024;
+        const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+    };
+
+    /**
      * Handles form submission with improved validation and error handling
      */
     const handleSubmit = async (e: React.FormEvent) => {
@@ -87,6 +118,7 @@ function useYoutube() {
         // Reset states
         setError('');
         setVideoInfo(null);
+        setFileInfo(null);
         setDownloadProgress(null);
 
         // Validate URL first
@@ -97,13 +129,16 @@ function useYoutube() {
         }
 
         setIsLoading(true);
+        setDownloadStatus('processing');
 
         try {
             const videoId = extractVideoId(url);
 
             // Call the API with abort controller for cancellation support
             const abortController = new AbortController();
-            const timeoutId = setTimeout(() => abortController.abort(), 60000); // 60s timeout
+            const timeoutId = setTimeout(() => abortController.abort(), 120000); // 2 minute timeout for video processing
+
+            console.log('Sending request to /api/download with URL:', url);
 
             const response = await fetch('/api/download', {
                 method: 'POST',
@@ -116,11 +151,14 @@ function useYoutube() {
 
             clearTimeout(timeoutId);
 
+            console.log('Response status:', response.status);
+
             if (!response.ok) {
                 let errorMessage = 'Video download failed';
                 try {
                     const errorData = await response.json();
-                    errorMessage = errorData.error || errorMessage;
+                    console.error('Error response:', errorData);
+                    errorMessage = errorData.message || errorData.error || errorMessage;
                 } catch (e) {
                     // If JSON parsing fails, use the status text
                     errorMessage = `Error: ${response.status} ${response.statusText}`;
@@ -128,16 +166,21 @@ function useYoutube() {
                 throw new Error(errorMessage);
             }
 
-            const data = await response.json();
+            const data: DownloadResponse = await response.json();
+            console.log('Success response:', data);
 
-            // Store complete video info
+            // Store video and file info with proper mapping
             setVideoInfo({
-                ...data,
-                videoId
+                ...data.videoInfo,
+                videoId: videoId ?? undefined,
+                // Ensure author field is populated (map from uploader if needed)
+                author: data.videoInfo.author || (data.videoInfo as any).uploader || 'Unknown'
             });
+            setFileInfo(data.file);
 
-            setDownloadStatus('complete');
+            setDownloadStatus('ready');
         } catch (err) {
+            console.error('Processing error:', err);
             if (err instanceof Error) {
                 if (err.name === 'AbortError') {
                     setError('Request timed out. Please try again.');
@@ -157,50 +200,51 @@ function useYoutube() {
      * Initiates video file download with improved error handling and feedback
      */
     const downloadVideo = async () => {
-        if (!videoInfo) return;
+        if (!fileInfo) {
+            setError('No file information available');
+            return;
+        }
 
         setDownloadStatus('downloading');
         setError('');
 
         try {
-            // Create a download link and trigger it
-            const downloadUrl = `/api/file?filename=${encodeURIComponent(videoInfo.filename)}`;
-            console.log('Requesting file download from:', downloadUrl);
+            // Use the full URL from the API response
+            const downloadUrl = fileInfo.fullUrl;
+            console.log('Downloading file from:', downloadUrl);
 
-            // First check if the file exists with a HEAD request
+            // First check if the file exists
             const checkResponse = await fetch(downloadUrl, { method: 'HEAD' });
 
             if (!checkResponse.ok) {
                 console.error('File availability check failed:', checkResponse.status, checkResponse.statusText);
-
-                // Get more details about why the file isn't available
-                const errorDetails = await checkResponse.json().catch(() => ({}));
-                console.error('Error details:', errorDetails);
-
-                throw new Error(`File not available: ${errorDetails.error || checkResponse.statusText}`);
+                throw new Error(`File not available (${checkResponse.status})`);
             }
 
-            // The file exists, now download it
-            console.log('File is available, starting download');
+            console.log('File is available, starting download...');
 
             // Create an anchor element and trigger download
             const downloadLink = document.createElement('a');
             downloadLink.href = downloadUrl;
-            downloadLink.download = videoInfo.filename; // Suggest filename to browser
+            downloadLink.download = fileInfo.originalFilename; // Use original filename
+            downloadLink.target = '_blank'; // Open in new tab as fallback
+
+            // Add to DOM temporarily
             document.body.appendChild(downloadLink);
             downloadLink.click();
 
-            // Remove the link after a brief delay
+            // Clean up
             setTimeout(() => {
                 if (document.body.contains(downloadLink)) {
                     document.body.removeChild(downloadLink);
                 }
-            }, 2000);
+            }, 1000);
 
-            // Change status after a brief delay
+            // Update status after brief delay
             setTimeout(() => {
                 setDownloadStatus('complete');
-            }, 1500);
+            }, 1000);
+
         } catch (err) {
             console.error('Download error:', err);
             setDownloadStatus('error');
@@ -219,23 +263,51 @@ function useYoutube() {
     const resetForm = () => {
         setUrl('');
         setVideoInfo(null);
+        setFileInfo(null);
         setError('');
         setIsLoading(false);
         setDownloadProgress(null);
         setDownloadStatus('idle');
     };
 
+    /**
+     * Gets formatted file size string
+     */
+    const getFormattedFileSize = (): string => {
+        if (!fileInfo) return '';
+        return formatFileSize(fileInfo.size);
+    };
+
+    /**
+     * Checks if video is ready for download
+     */
+    const isReadyToDownload = (): boolean => {
+        return downloadStatus === 'ready' && videoInfo !== null && fileInfo !== null;
+    };
+
     return {
+        // State
         url,
         setUrl,
         isLoading,
         videoInfo,
+        fileInfo,
         error,
-        downloadVideo,
-        handleSubmit,
-        resetForm,
         downloadStatus,
-        downloadProgress
+        downloadProgress,
+
+        // Actions
+        handleSubmit,
+        downloadVideo,
+        resetForm,
+
+        // Computed values
+        getFormattedFileSize,
+        isReadyToDownload,
+
+        // Utils (in case you need them in components)
+        validateYoutubeUrl,
+        extractVideoId
     };
 }
 

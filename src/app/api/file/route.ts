@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import fs from 'fs';
-import { ensureDirExists, TEMP_DIR } from '@/lib/utils/file-system';
+import { ensureDirExists, TEMP_DIR } from '@/lib/file-system';
 
 /**
  * API Route for serving video files with detailed debugging
