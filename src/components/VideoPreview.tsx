@@ -17,7 +17,60 @@ const VideoPreview = ({ videoSource, thumbnail, title, uploader }: VideoPreviewP
   const [isError, setIsError] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
 
-  // Add validation for videoSource
+  // Fixed path logic - use videoSource directly if it's already a full URL
+  const filePath = videoSource && (videoSource.startsWith('http') || videoSource.startsWith('/'))
+    ? videoSource  // Use as-is if it's already a full URL or absolute path
+    : videoSource ? `/temp/${videoSource}` : ''; // Only add /temp/ prefix if it's a relative filename
+
+  console.log("Original videoSource:", videoSource);
+  console.log("Constructed filePath:", filePath);
+
+  // Reset error state when source changes
+  useEffect(() => {
+    setIsError(false);
+  }, [videoSource]);
+
+  // Handle video events
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !videoSource) return;
+
+    const handleEnded = () => {
+      setIsPlaying(false);
+    };
+
+    const handleError = (e: Event) => {
+      console.error("Video error encountered:", e);
+      console.error("Failed to load video from:", filePath);
+      setIsError(true);
+      setIsPlaying(false);
+      setIsLoading(false);
+    };
+
+    const handleLoadStart = () => {
+      console.log("Video started loading from:", filePath);
+    };
+
+    const handleCanPlay = () => {
+      console.log("Video can play:", filePath);
+    };
+
+    // Add event listeners
+    video.addEventListener('ended', handleEnded);
+    video.addEventListener('error', handleError);
+    video.addEventListener('loadstart', handleLoadStart);
+    video.addEventListener('canplay', handleCanPlay);
+
+    // Cleanup
+    return () => {
+      video.removeEventListener('ended', handleEnded);
+      video.removeEventListener('error', handleError);
+      video.removeEventListener('loadstart', handleLoadStart);
+      video.removeEventListener('canplay', handleCanPlay);
+    };
+  }, [filePath, videoSource]);
+
+  // Add validation for videoSource AFTER all hooks
   if (!videoSource) {
     console.error("VideoPreview: videoSource is required but was not provided");
     return (
@@ -28,19 +81,6 @@ const VideoPreview = ({ videoSource, thumbnail, title, uploader }: VideoPreviewP
       </div>
     );
   }
-
-  // Fixed path logic - use videoSource directly if it's already a full URL
-  const filePath = videoSource.startsWith('http') || videoSource.startsWith('/')
-    ? videoSource  // Use as-is if it's already a full URL or absolute path
-    : `/temp/${videoSource}`; // Only add /temp/ prefix if it's a relative filename
-
-  console.log("Original videoSource:", videoSource);
-  console.log("Constructed filePath:", filePath);
-
-  // Reset error state when source changes
-  useEffect(() => {
-    setIsError(false);
-  }, [videoSource]);
 
   // Handle play/pause with proper state management
   const handlePlayClick = () => {
@@ -90,46 +130,6 @@ const VideoPreview = ({ videoSource, thumbnail, title, uploader }: VideoPreviewP
       setIsMuted(newMutedState);
     }
   };
-
-  // Handle video events
-  useEffect(() => {
-    const video = videoRef.current;
-    if (!video) return;
-
-    const handleEnded = () => {
-      setIsPlaying(false);
-    };
-
-    const handleError = (e: Event) => {
-      console.error("Video error encountered:", e);
-      console.error("Failed to load video from:", filePath);
-      setIsError(true);
-      setIsPlaying(false);
-      setIsLoading(false);
-    };
-
-    const handleLoadStart = () => {
-      console.log("Video started loading from:", filePath);
-    };
-
-    const handleCanPlay = () => {
-      console.log("Video can play:", filePath);
-    };
-
-    // Add event listeners
-    video.addEventListener('ended', handleEnded);
-    video.addEventListener('error', handleError);
-    video.addEventListener('loadstart', handleLoadStart);
-    video.addEventListener('canplay', handleCanPlay);
-
-    // Cleanup
-    return () => {
-      video.removeEventListener('ended', handleEnded);
-      video.removeEventListener('error', handleError);
-      video.removeEventListener('loadstart', handleLoadStart);
-      video.removeEventListener('canplay', handleCanPlay);
-    };
-  }, [filePath]);
 
   return (
     <div className="relative w-full aspect-video bg-black overflow-hidden rounded-lg">
