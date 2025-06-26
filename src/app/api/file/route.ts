@@ -1,15 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
-import path from 'path';
-import fs from 'fs';
-import { ensureDirExists, TEMP_DIR } from '@/lib/file-system';
+import { head, list } from '@vercel/blob';
 
 /**
- * API Route for serving video files with detailed debugging
+ * API Route for serving video files from Vercel Blob Storage with detailed debugging
  */
 export async function GET(request: NextRequest) {
   try {
-    console.log('File request received:', request.url);
-    console.log('TEMP_DIR path:', TEMP_DIR);
+    console.log('Blob file request received:', request.url);
     
     // Get the URL and parse it
     const url = new URL(request.url);
@@ -42,105 +39,222 @@ export async function GET(request: NextRequest) {
       }, { status: 400 });
     }
 
-    // Ensure temp directory exists
-    console.log('Ensuring directory exists:', TEMP_DIR);
-    ensureDirExists(TEMP_DIR);
-    console.log('Directory exists:', fs.existsSync(TEMP_DIR));
+    console.log('Looking for blob file:', filename);
 
-    // Prevent path traversal attacks
-    const sanitizedFilename = path.basename(filename);
-    console.log('Sanitized filename:', sanitizedFilename);
-    
-    const filePath = path.join(TEMP_DIR, sanitizedFilename);
-    console.log('Looking for file at:', filePath);
-    
-    // Check if file exists
-    const fileExists = fs.existsSync(filePath);
-    console.log('File exists:', fileExists);
-    
-    if (!fileExists) {
-      // List all files in the directory for debugging
-      try {
-        const dirFiles = fs.readdirSync(TEMP_DIR);
-        console.log('Files in directory:', dirFiles);
-      } catch (err) {
-        console.log('Error reading directory:', err);
+    try {
+      // First, try to get file metadata from Blob Storage
+      const { blobs } = await list({
+        prefix: filename,
+        limit: 1
+      });
+
+      console.log('Blob search results:', blobs);
+
+      if (blobs.length === 0) {
+        // If exact match not found, try to list all files for debugging
+        console.log('Exact match not found, listing all files...');
+        
+        try {
+          const { blobs: allBlobs } = await list({ limit: 100 });
+          console.log('All blobs in storage:', allBlobs.map(b => b.pathname));
+          
+          // Try to find a partial match
+          const partialMatch = allBlobs.find(blob => 
+            blob.pathname.includes(filename!) || filename!.includes(blob.pathname)
+          );
+          
+          if (partialMatch) {
+            console.log('Found partial match:', partialMatch.pathname);
+            filename = partialMatch.pathname;
+          } else {
+            return NextResponse.json({
+              error: 'File not found in Blob Storage',
+              filename: filename,
+              availableFiles: allBlobs.map(b => b.pathname).slice(0, 10) // Show first 10 files
+            }, { status: 404 });
+          }
+        } catch (listError) {
+          console.error('Error listing blobs:', listError);
+          return NextResponse.json({
+            error: 'File not found and could not list available files',
+            filename: filename,
+            details: listError instanceof Error ? listError.message : String(listError)
+          }, { status: 404 });
+        }
+      } else {
+        // Use the exact match
+        filename = blobs[0].pathname;
+        console.log('Using exact match:', filename);
+      }
+
+      // Get file metadata
+      const blobInfo = await head(filename);
+      console.log('Blob info:', {
+        url: blobInfo.url,
+        size: blobInfo.size,
+        contentType: blobInfo.contentType,
+        pathname: blobInfo.pathname
+      });
+
+      // Determine content type
+      let contentType = blobInfo.contentType || 'application/octet-stream';
+      
+      // If content type is not set, determine from filename
+      if (contentType === 'application/octet-stream') {
+        const extension = filename.split('.').pop()?.toLowerCase();
+        console.log('File extension:', extension);
+        
+        switch (extension) {
+          case 'mp4': contentType = 'video/mp4'; break;
+          case 'webm': contentType = 'video/webm'; break;
+          case 'mov': contentType = 'video/quicktime'; break;
+          case 'avi': contentType = 'video/x-msvideo'; break;
+          case 'mkv': contentType = 'video/x-matroska'; break;
+          default: contentType = 'video/mp4'; // Default to mp4
+        }
       }
       
-      return NextResponse.json({
-        error: 'File not found',
-        filename: sanitizedFilename,
-        path: filePath,
-        tempDir: TEMP_DIR
-      }, { status: 404 });
+      console.log('Final content type:', contentType);
+
+      // Check if client wants range requests (for video streaming)
+      const range = request.headers.get('range');
+      console.log('Range header:', range);
+
+      if (range && blobInfo.size) {
+        // Handle range requests for video streaming
+        const parts = range.replace(/bytes=/, '').split('-');
+        const start = parseInt(parts[0], 10);
+        const end = parts[1] ? parseInt(parts[1], 10) : blobInfo.size - 1;
+        const chunkSize = end - start + 1;
+        
+        console.log(`Streaming range: ${start}-${end}/${blobInfo.size}`);
+        
+        // For range requests, we need to fetch the blob and slice it
+        // Note: This is not the most efficient for large files
+        // For production, consider using a CDN or direct blob URL
+        
+        try {
+          const response = await fetch(blobInfo.url, {
+            headers: {
+              'Range': `bytes=${start}-${end}`
+            }
+          });
+
+          if (response.status === 206 || response.status === 200) {
+            const headers = {
+              'Content-Range': `bytes ${start}-${end}/${blobInfo.size}`,
+              'Accept-Ranges': 'bytes',
+              'Content-Length': chunkSize.toString(),
+              'Content-Type': contentType,
+              'Cache-Control': 'public, max-age=31536000', // Cache for 1 year
+            };
+
+            return new NextResponse(response.body, {
+              status: 206,
+              headers: headers,
+            });
+          } else {
+            throw new Error(`Failed to fetch range from blob: ${response.status}`);
+          }
+        } catch (rangeError) {
+          console.error('Error handling range request:', rangeError);
+          // Fallback to full file if range request fails
+        }
+      }
+
+      // For non-range requests or when range request fails
+      // Redirect to the blob URL directly (most efficient)
+      const shouldRedirect = url.searchParams.get('redirect') !== 'false';
+      
+      if (shouldRedirect) {
+        console.log('Redirecting to blob URL:', blobInfo.url);
+        return NextResponse.redirect(blobInfo.url, 302);
+      } else {
+        // Proxy the file through our API (less efficient but more control)
+        console.log('Proxying file through API');
+        
+        const blobResponse = await fetch(blobInfo.url);
+        
+        if (!blobResponse.ok) {
+          throw new Error(`Failed to fetch blob: ${blobResponse.status} ${blobResponse.statusText}`);
+        }
+
+        const headers = {
+          'Content-Type': contentType,
+          'Content-Length': blobInfo.size?.toString() || '',
+          'Cache-Control': 'public, max-age=31536000', // Cache for 1 year
+          'Content-Disposition': `inline; filename="${filename}"`,
+        };
+
+        return new NextResponse(blobResponse.body, {
+          status: 200,
+          headers: headers,
+        });
+      }
+
+    } catch (blobError) {
+      console.error('Error accessing blob:', blobError);
+      
+      // Try to list available files for debugging
+      try {
+        const { blobs } = await list({ limit: 10 });
+        return NextResponse.json({
+          error: 'Error accessing blob file',
+          filename: filename,
+          details: blobError instanceof Error ? blobError.message : String(blobError),
+          availableFiles: blobs.map(b => b.pathname)
+        }, { status: 500 });
+      } catch (listError) {
+        return NextResponse.json({
+          error: 'Error accessing blob file and could not list files',
+          filename: filename,
+          details: blobError instanceof Error ? blobError.message : String(blobError)
+        }, { status: 500 });
+      }
     }
 
-    // Get file stats
-    const stat = fs.statSync(filePath);
-    const fileSize = stat.size;
-    console.log('File size:', fileSize);
-    
-    // Determine file type based on extension
-    const extension = path.extname(sanitizedFilename).toLowerCase();
-    console.log('File extension:', extension);
-    
-    let fileType = 'application/octet-stream'; // Default
-    
-    // Set appropriate content type based on file extension
-    if (extension === '.mp4') fileType = 'video/mp4';
-    else if (extension === '.webm') fileType = 'video/webm';
-    else if (extension === '.mov') fileType = 'video/quicktime';
-    else if (extension === '.avi') fileType = 'video/x-msvideo';
-    else if (extension === '.mkv') fileType = 'video/x-matroska';
-    
-    console.log('File type:', fileType);
-
-    // Handle range requests for video streaming
-    const range = request.headers.get('range');
-    console.log('Range header:', range);
-    
-    if (range) {
-      const parts = range.replace(/bytes=/, '').split('-');
-      const start = parseInt(parts[0], 10);
-      const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-      const chunkSize = end - start + 1;
-      
-      console.log(`Streaming range: ${start}-${end}/${fileSize}`);
-      
-      const file = fs.createReadStream(filePath, { start, end });
-      
-      // Note: This is only needed if you want to manually stream the file
-      // Otherwise, Next.js static file serving will handle this
-      const headers = {
-        'Content-Range': `bytes ${start}-${end}/${fileSize}`,
-        'Accept-Ranges': 'bytes',
-        'Content-Length': chunkSize.toString(),
-        'Content-Type': fileType,
-      };
-
-      return new NextResponse(file as any, {
-        status: 206,
-        headers: headers,
-      });
-    } else {
-      // If no range requested, serve entire file
-      console.log('Serving entire file');
-      
-      const headers = {
-        'Content-Length': fileSize.toString(),
-        'Content-Type': fileType,
-      };
-
-      const file = fs.readFileSync(filePath);
-      return new NextResponse(file, {
-        status: 200,
-        headers: headers,
-      });
-    }
   } catch (error) {
-    console.error('Error serving video:', error);
+    console.error('Error serving video from blob:', error);
     return NextResponse.json({
-      error: 'Failed to serve video file',
+      error: 'Failed to serve video file from Blob Storage',
+      details: error instanceof Error ? error.message : String(error)
+    }, { status: 500 });
+  }
+}
+
+/**
+ * Handle DELETE requests to remove files from Blob Storage
+ */
+export async function DELETE(request: NextRequest) {
+  try {
+    const url = new URL(request.url);
+    const filename = url.searchParams.get('filename');
+    
+    if (!filename) {
+      return NextResponse.json({
+        error: 'Filename is required for deletion'
+      }, { status: 400 });
+    }
+
+    console.log('Attempting to delete blob:', filename);
+
+    // Import del method dynamically
+    const { del } = await import('@vercel/blob');
+    
+    await del(filename);
+    
+    console.log('Successfully deleted blob:', filename);
+    
+    return NextResponse.json({
+      success: true,
+      message: 'File deleted successfully',
+      filename: filename
+    });
+
+  } catch (error) {
+    console.error('Error deleting blob:', error);
+    return NextResponse.json({
+      error: 'Failed to delete file',
       details: error instanceof Error ? error.message : String(error)
     }, { status: 500 });
   }

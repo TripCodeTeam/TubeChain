@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { put } from '@vercel/blob';
 
 // Interfaces para el tipo de respuesta
 interface VideoInfo {
@@ -22,12 +23,21 @@ interface VideoInfo {
 // Configuración del backend NestJS
 const BACKEND_URL = process.env.BACKEND_URL!;
 
+// Función para sanitizar nombres de archivo
+function sanitizeFilename(filename: string): string {
+  return filename
+    .replace(/[^\w\s-\.]/g, '')
+    .replace(/\s+/g, '_')
+    .replace(/_{2,}/g, '_')
+    .substring(0, 100);
+}
+
 /**
  * Handles POST requests to download a video using the NestJS backend
  * - Validates input URL
  * - Makes request to NestJS backend
- * - Streams video directly to client (no persistence)
- * - Returns video stream with appropriate headers
+ * - Uploads video to Vercel Blob Storage
+ * - Returns JSON response with video details and blob URL
  */
 export async function POST(request: NextRequest) {
   try {
@@ -35,7 +45,7 @@ export async function POST(request: NextRequest) {
 
     // Parse request body
     const body = await request.json();
-    const { url, returnInfo } = body;
+    const { url } = body;
 
     // Validate URL
     if (!url) {
@@ -93,89 +103,82 @@ export async function POST(request: NextRequest) {
       }, { status: backendResponse.status });
     }
 
-    // If returnInfo is true, return video info instead of streaming
-    if (returnInfo) {
-      // Get video info from headers
-      const videoInfoHeader = backendResponse.headers.get('X-Video-Info');
-      let videoInfo: Partial<VideoInfo> = {};
+    // Get video info from headers
+    const videoInfoHeader = backendResponse.headers.get('X-Video-Info');
+    let videoInfo: Partial<VideoInfo> = {};
 
-      if (videoInfoHeader) {
-        try {
-          videoInfo = JSON.parse(videoInfoHeader);
-        } catch (parseError) {
-          console.error('Error parsing video info from header:', parseError);
-        }
+    if (videoInfoHeader) {
+      try {
+        videoInfo = JSON.parse(videoInfoHeader);
+      } catch (parseError) {
+        console.error('Error parsing video info from header:', parseError);
       }
-
-      // Get filename from Content-Disposition header
-      const contentDisposition = backendResponse.headers.get('Content-Disposition');
-      let originalFilename = 'downloaded_video.mp4';
-      
-      if (contentDisposition) {
-        const filenameMatch = contentDisposition.match(/filename[^;=\n]*=([^;\n]*)/);
-        if (filenameMatch && filenameMatch[1]) {
-          originalFilename = filenameMatch[1].replace(/['"]/g, '');
-        }
-      }
-
-      const contentLength = backendResponse.headers.get('Content-Length');
-      const fileSize = contentLength ? parseInt(contentLength, 10) : 0;
-
-      // Consume the stream to prevent hanging
-      await backendResponse.arrayBuffer();
-
-      return NextResponse.json({
-        success: true,
-        message: 'Video info retrieved successfully',
-        videoInfo: {
-          title: videoInfo.title || 'Unknown Title',
-          duration: videoInfo.duration || 'Unknown Duration',
-          quality: videoInfo.quality || 'Unknown Quality',
-          author: videoInfo.author || 'Unknown Author',
-          viewCount: videoInfo.viewCount || 0,
-          fileSize: fileSize,
-          ...videoInfo
-        },
-        file: {
-          originalFilename: originalFilename,
-          size: fileSize,
-          contentType: backendResponse.headers.get('Content-Type') || 'video/mp4'
-        },
-        timestamp: new Date().toISOString()
-      });
     }
 
-    // Stream video directly to client
+    // Get filename from Content-Disposition header
+    const contentDisposition = backendResponse.headers.get('Content-Disposition');
+    let originalFilename = 'downloaded_video.mp4';
+    
+    if (contentDisposition) {
+      const filenameMatch = contentDisposition.match(/filename[^;=\n]*=([^;\n]*)/);
+      if (filenameMatch && filenameMatch[1]) {
+        originalFilename = filenameMatch[1].replace(/['"]/g, '');
+      }
+    }
+
+    // Sanitize filename and ensure it's unique
+    const sanitizedFilename = sanitizeFilename(originalFilename);
+    const timestamp = Date.now();
+    const uniqueFilename = `${timestamp}_${sanitizedFilename}`;
+
+    console.log(`Uploading video to Blob Storage as: ${uniqueFilename}`);
+
+    // Convert response to stream for Vercel Blob
     const videoStream = backendResponse.body;
     
     if (!videoStream) {
       throw new Error('No video stream received from backend');
     }
 
-    // Get filename from Content-Disposition header
-    const contentDisposition = backendResponse.headers.get('Content-Disposition');
-    let filename = 'downloaded_video.mp4';
-    
-    if (contentDisposition) {
-      const filenameMatch = contentDisposition.match(/filename[^;=\n]*=([^;\n]*)/);
-      if (filenameMatch && filenameMatch[1]) {
-        filename = filenameMatch[1].replace(/['"]/g, '');
-      }
-    }
-
-    // Create response with appropriate headers for file download
-    const response = new NextResponse(videoStream, {
-      status: 200,
-      headers: {
-        'Content-Type': backendResponse.headers.get('Content-Type') || 'video/mp4',
-        'Content-Disposition': `attachment; filename="${filename}"`,
-        'Content-Length': backendResponse.headers.get('Content-Length') || '',
-        'Cache-Control': 'no-cache',
-      },
+    // Upload to Vercel Blob Storage
+    const blobResult = await put(uniqueFilename, videoStream, {
+      access: 'public',
+      contentType: backendResponse.headers.get('Content-Type') || 'video/mp4',
     });
 
-    console.log('Video stream initiated successfully');
-    return response;
+    console.log(`Video uploaded successfully to Blob Storage: ${blobResult.url}`);
+
+    // Get file size from response headers or calculate from stream
+    const contentLength = backendResponse.headers.get('Content-Length');
+    const fileSize = contentLength ? parseInt(contentLength, 10) : 0;
+
+    // Return success response with video info and blob details
+    const response = {
+      success: true,
+      message: 'Video downloaded and saved successfully to Blob Storage',
+      videoInfo: {
+        title: videoInfo.title || 'Unknown Title',
+        duration: videoInfo.duration || 'Unknown Duration',
+        quality: videoInfo.quality || 'Unknown Quality',
+        author: videoInfo.author || 'Unknown Author',
+        viewCount: videoInfo.viewCount || 0,
+        fileSize: fileSize,
+        ...videoInfo
+      },
+      file: {
+        filename: uniqueFilename,
+        originalFilename: originalFilename,
+        size: fileSize,
+        url: blobResult.url,
+        downloadUrl: blobResult.downloadUrl,
+        contentType: backendResponse.headers.get('Content-Type') || 'video/mp4'
+      },
+      downloadUrl: blobResult.url,
+      timestamp: new Date().toISOString()
+    };
+
+    console.log('Download and upload completed successfully');
+    return NextResponse.json(response, { status: 200 });
 
   } catch (error) {
     console.error('Error in POST handler:', error);
