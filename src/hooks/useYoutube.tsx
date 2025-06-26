@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react";
 
 // Interface for video metadata used in the UI - Updated to match the component needs
-type VideoInfo = {
+export type VideoInfo = {
     title: string;          // Original video title
     duration: string | number; // Duration can be formatted string or seconds number
     quality: string;        // Video quality (e.g., "1080p")
