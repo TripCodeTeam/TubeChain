@@ -204,26 +204,3 @@ export async function POST(request: NextRequest) {
     }, { status: 500 });
   }
 }
-
-// Optional: Add cleanup function for old files (can be called periodically)
-export async function cleanup(maxAgeMs: number = 24 * 60 * 60 * 1000) { // Default: 24 hours
-  try {
-    if (!fs.existsSync(TEMP_DIR)) return;
-
-    const files = fs.readdirSync(TEMP_DIR);
-    const now = Date.now();
-
-    for (const file of files) {
-      const filePath = path.join(TEMP_DIR, file);
-      const stats = fs.statSync(filePath);
-      const age = now - stats.mtime.getTime();
-
-      if (age > maxAgeMs) {
-        fs.unlinkSync(filePath);
-        console.log(`Cleaned up old file: ${file}`);
-      }
-    }
-  } catch (error) {
-    console.error('Error during cleanup:', error);
-  }
-}
