@@ -22,7 +22,7 @@ interface VideoInfo {
 }
 
 // Configuración del backend NestJS
-const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:3001';
+const BACKEND_URL = process.env.BACKEND_URL!;
 const TEMP_DIR = path.join(process.cwd(), 'public', 'temp');
 
 // Función para asegurar que el directorio existe

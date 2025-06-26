@@ -29,17 +29,18 @@ const VideoPreview = ({ videoSource, thumbnail, title, uploader }: VideoPreviewP
     );
   }
 
-  // Updated path logic to use /temp in the public folder with proper validation
-  const filePath = videoSource.startsWith('/')
-    ? videoSource
-    : `temp/${videoSource}`; // Now this will point to public/temp/ since paths in public are served at the root
+  // Fixed path logic - use videoSource directly if it's already a full URL
+  const filePath = videoSource.startsWith('http') || videoSource.startsWith('/')
+    ? videoSource  // Use as-is if it's already a full URL or absolute path
+    : `/temp/${videoSource}`; // Only add /temp/ prefix if it's a relative filename
+
+  console.log("Original videoSource:", videoSource);
+  console.log("Constructed filePath:", filePath);
 
   // Reset error state when source changes
   useEffect(() => {
     setIsError(false);
   }, [videoSource]);
-
-  console.log("Video source:", videoSource);
 
   // Handle play/pause with proper state management
   const handlePlayClick = () => {
@@ -99,23 +100,36 @@ const VideoPreview = ({ videoSource, thumbnail, title, uploader }: VideoPreviewP
       setIsPlaying(false);
     };
 
-    const handleError = () => {
-      console.error("Video error encountered");
+    const handleError = (e: Event) => {
+      console.error("Video error encountered:", e);
+      console.error("Failed to load video from:", filePath);
       setIsError(true);
       setIsPlaying(false);
       setIsLoading(false);
     };
 
+    const handleLoadStart = () => {
+      console.log("Video started loading from:", filePath);
+    };
+
+    const handleCanPlay = () => {
+      console.log("Video can play:", filePath);
+    };
+
     // Add event listeners
     video.addEventListener('ended', handleEnded);
     video.addEventListener('error', handleError);
+    video.addEventListener('loadstart', handleLoadStart);
+    video.addEventListener('canplay', handleCanPlay);
 
     // Cleanup
     return () => {
       video.removeEventListener('ended', handleEnded);
       video.removeEventListener('error', handleError);
+      video.removeEventListener('loadstart', handleLoadStart);
+      video.removeEventListener('canplay', handleCanPlay);
     };
-  }, []);
+  }, [filePath]);
 
   return (
     <div className="relative w-full aspect-video bg-black overflow-hidden rounded-lg">
@@ -143,8 +157,11 @@ const VideoPreview = ({ videoSource, thumbnail, title, uploader }: VideoPreviewP
       {/* Error overlay */}
       {isError && (
         <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/70 z-20">
-          <p className="text-white text-center px-4">
+          <p className="text-white text-center px-4 mb-2">
             Error playing video. The file may be corrupted or in an unsupported format.
+          </p>
+          <p className="text-white/70 text-sm text-center px-4 mb-4">
+            Attempted to load: {filePath}
           </p>
           <button
             className="mt-4 px-4 py-2 bg-white/20 hover:bg-white/30 text-white rounded-md"
