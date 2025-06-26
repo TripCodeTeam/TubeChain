@@ -1,6 +1,4 @@
 import { NextRequest, NextResponse } from 'next/server';
-import path from 'path';
-import fs from 'fs';
 
 // Interfaces para el tipo de respuesta
 interface VideoInfo {
@@ -23,31 +21,13 @@ interface VideoInfo {
 
 // Configuración del backend NestJS
 const BACKEND_URL = process.env.BACKEND_URL!;
-const TEMP_DIR = path.join(process.cwd(), 'public', 'temp');
-
-// Función para asegurar que el directorio existe
-function ensureDirExists(dirPath: string): void {
-  if (!fs.existsSync(dirPath)) {
-    fs.mkdirSync(dirPath, { recursive: true });
-    console.log(`Directorio creado: ${dirPath}`);
-  }
-}
-
-// Función para sanitizar nombres de archivo
-function sanitizeFilename(filename: string): string {
-  return filename
-    .replace(/[^\w\s-\.]/g, '')
-    .replace(/\s+/g, '_')
-    .replace(/_{2,}/g, '_')
-    .substring(0, 100);
-}
 
 /**
  * Handles POST requests to download a video using the NestJS backend
  * - Validates input URL
  * - Makes request to NestJS backend
- * - Saves video file temporarily in /public/temp
- * - Returns JSON response with video details and file path
+ * - Streams video directly to client (no persistence)
+ * - Returns video stream with appropriate headers
  */
 export async function POST(request: NextRequest) {
   try {
@@ -55,7 +35,7 @@ export async function POST(request: NextRequest) {
 
     // Parse request body
     const body = await request.json();
-    const { url } = body;
+    const { url, returnInfo } = body;
 
     // Validate URL
     if (!url) {
@@ -77,9 +57,6 @@ export async function POST(request: NextRequest) {
     }
 
     console.log(`Processing YouTube URL: ${url}`);
-
-    // Ensure temp directory exists
-    ensureDirExists(TEMP_DIR);
 
     // Make request to NestJS backend
     console.log(`Making request to backend: ${BACKEND_URL}/youtube/download`);
@@ -116,82 +93,92 @@ export async function POST(request: NextRequest) {
       }, { status: backendResponse.status });
     }
 
-    // Get video info from headers
-    const videoInfoHeader = backendResponse.headers.get('X-Video-Info');
-    let videoInfo: Partial<VideoInfo> = {};
+    // If returnInfo is true, return video info instead of streaming
+    if (returnInfo) {
+      // Get video info from headers
+      const videoInfoHeader = backendResponse.headers.get('X-Video-Info');
+      let videoInfo: Partial<VideoInfo> = {};
 
-    if (videoInfoHeader) {
-      try {
-        videoInfo = JSON.parse(videoInfoHeader);
-      } catch (parseError) {
-        console.error('Error parsing video info from header:', parseError);
+      if (videoInfoHeader) {
+        try {
+          videoInfo = JSON.parse(videoInfoHeader);
+        } catch (parseError) {
+          console.error('Error parsing video info from header:', parseError);
+        }
       }
+
+      // Get filename from Content-Disposition header
+      const contentDisposition = backendResponse.headers.get('Content-Disposition');
+      let originalFilename = 'downloaded_video.mp4';
+      
+      if (contentDisposition) {
+        const filenameMatch = contentDisposition.match(/filename[^;=\n]*=([^;\n]*)/);
+        if (filenameMatch && filenameMatch[1]) {
+          originalFilename = filenameMatch[1].replace(/['"]/g, '');
+        }
+      }
+
+      const contentLength = backendResponse.headers.get('Content-Length');
+      const fileSize = contentLength ? parseInt(contentLength, 10) : 0;
+
+      // Consume the stream to prevent hanging
+      await backendResponse.arrayBuffer();
+
+      return NextResponse.json({
+        success: true,
+        message: 'Video info retrieved successfully',
+        videoInfo: {
+          title: videoInfo.title || 'Unknown Title',
+          duration: videoInfo.duration || 'Unknown Duration',
+          quality: videoInfo.quality || 'Unknown Quality',
+          author: videoInfo.author || 'Unknown Author',
+          viewCount: videoInfo.viewCount || 0,
+          fileSize: fileSize,
+          ...videoInfo
+        },
+        file: {
+          originalFilename: originalFilename,
+          size: fileSize,
+          contentType: backendResponse.headers.get('Content-Type') || 'video/mp4'
+        },
+        timestamp: new Date().toISOString()
+      });
+    }
+
+    // Stream video directly to client
+    const videoStream = backendResponse.body;
+    
+    if (!videoStream) {
+      throw new Error('No video stream received from backend');
     }
 
     // Get filename from Content-Disposition header
     const contentDisposition = backendResponse.headers.get('Content-Disposition');
-    let originalFilename = 'downloaded_video.mp4';
+    let filename = 'downloaded_video.mp4';
     
     if (contentDisposition) {
       const filenameMatch = contentDisposition.match(/filename[^;=\n]*=([^;\n]*)/);
       if (filenameMatch && filenameMatch[1]) {
-        originalFilename = filenameMatch[1].replace(/['"]/g, '');
+        filename = filenameMatch[1].replace(/['"]/g, '');
       }
     }
 
-    // Sanitize filename and ensure it's unique
-    const sanitizedFilename = sanitizeFilename(originalFilename);
-    const timestamp = Date.now();
-    const uniqueFilename = `${timestamp}_${sanitizedFilename}`;
-    const filePath = path.join(TEMP_DIR, uniqueFilename);
-
-    console.log(`Saving video as: ${uniqueFilename}`);
-
-    // Convert response to buffer and save file
-    const arrayBuffer = await backendResponse.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
-
-    // Save file to temp directory
-    fs.writeFileSync(filePath, buffer);
-    console.log(`Video saved successfully: ${filePath} (${buffer.length} bytes)`);
-
-    // Construct the URL to access the saved file
-    const fileUrl = `/temp/${uniqueFilename}`;
-    const fullFileUrl = `${request.nextUrl.origin}${fileUrl}`;
-
-    // Return success response with video info and file details
-    const response = {
-      success: true,
-      message: 'Video downloaded and saved successfully',
-      videoInfo: {
-        title: videoInfo.title || 'Unknown Title',
-        duration: videoInfo.duration || 'Unknown Duration',
-        quality: videoInfo.quality || 'Unknown Quality',
-        author: videoInfo.author || 'Unknown Author',
-        viewCount: videoInfo.viewCount || 0,
-        fileSize: buffer.length,
-        ...videoInfo
+    // Create response with appropriate headers for file download
+    const response = new NextResponse(videoStream, {
+      status: 200,
+      headers: {
+        'Content-Type': backendResponse.headers.get('Content-Type') || 'video/mp4',
+        'Content-Disposition': `attachment; filename="${filename}"`,
+        'Content-Length': backendResponse.headers.get('Content-Length') || '',
+        'Cache-Control': 'no-cache',
       },
-      file: {
-        filename: uniqueFilename,
-        originalFilename: originalFilename,
-        size: buffer.length,
-        path: fileUrl,
-        fullUrl: fullFileUrl,
-        contentType: backendResponse.headers.get('Content-Type') || 'video/mp4'
-      },
-      downloadUrl: fullFileUrl,
-      timestamp: new Date().toISOString()
-    };
+    });
 
-    console.log('Download completed successfully');
-    return NextResponse.json(response, { status: 200 });
+    console.log('Video stream initiated successfully');
+    return response;
 
   } catch (error) {
     console.error('Error in POST handler:', error);
-
-    // Clean up any partial file if it exists
-    // (This is a basic cleanup - in production you might want more sophisticated error handling)
 
     return NextResponse.json({
       success: false,
